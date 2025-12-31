@@ -11,10 +11,8 @@ from .layers import (
     Codebook,
 )
 from .encoder import Encoder, Decoder, CodebookManager
-from .config import ENCODER_CONFIGS
-from .generator import create_generator
-from .critic import create_critic
-from .rnn_decoder import create_rnn_decoder
+from .config import ENCODER_CONFIGS, GENERATOR_CONFIGS
+from .generator import Generator, ContextModel, create_generator
 
 from .audio import (
     u16_to_f32,
@@ -52,10 +50,11 @@ __all__ = [
     'Decoder',
     'CodebookManager',
     'ENCODER_CONFIGS',
-    # Generator/Critic
+    'GENERATOR_CONFIGS',
+    # Generator
+    'Generator',
+    'ContextModel',
     'create_generator',
-    'create_critic',
-    'create_rnn_decoder',
     # Audio utilities
     'u16_to_f32',
     'f32_to_u16',

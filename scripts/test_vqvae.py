@@ -38,7 +38,7 @@ Examples:
     parser.add_argument('--audio', type=str, required=True,
                        help='Path to input audio file (mp3, wav, m4a, etc.)')
     parser.add_argument('--model', type=str, required=True,
-                       choices=['vqvae_512', 'vqvae_128', 'vqvae_32'],
+                       choices=['vqvae_512', 'vqvae_128', 'vqvae_32', 'vqvae_8'],
                        help='Model preset name')
     parser.add_argument('--epoch', type=int, required=True,
                        help='Epoch number to load weights from')
@@ -98,7 +98,6 @@ Examples:
     encoder.load_weights(encoder_path)
     decoder.load_weights(decoder_path)
     codebook.load_weights(codebook_path)
-    print("Weights loaded successfully!")
     
     # Load audio file
     print(f"Loading audio file: {args.audio}")

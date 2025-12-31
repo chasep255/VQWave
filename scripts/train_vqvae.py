@@ -3,7 +3,7 @@
 Train VQ-VAE encoder/decoder model.
 
 This script trains the encoder, decoder, and codebook components of a VQ-VAE model
-using spectrogram-based loss functions.
+using audio reconstruction loss.
 """
 
 import argparse
@@ -36,11 +36,13 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 def stft_loss(y, r):
     """Compute multi-scale STFT loss."""
     loss = 0.0
-    for w, s in ((220, 44), (770, 110), (1100, 240)):
+    for w, s in ((256, 64), (512, 128), (1024, 256), (2048, 512)):
         y_ = tf.signal.stft(y, w, s)
         r_ = tf.signal.stft(r, w, s)
-        loss += tf.reduce_mean(tf.square(tf.abs(y_ - r_)))
+        loss += tf.reduce_mean(tf.abs(y_ - r_))
+
     return loss
+
 
 
 def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r):
@@ -58,17 +60,12 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r):
         # Decode to audio
         y = decoder(z_q_st, training=True)
         
-        spectral_loss = stft_loss(y, r)
+        audio_loss = stft_loss(y, r)
 
-        # VQ-VAE losses:
-        # - codebook loss updates codebook embeddings
-        # - commitment loss updates encoder (beta term)
-        z_e_f32 = tf.cast(z_e, tf.float32)
-        z_q_f32 = tf.cast(z_q, tf.float32)
-        codebook_loss = tf.reduce_mean(tf.square(tf.stop_gradient(z_e_f32) - z_q_f32))
-        commit_loss = 0.1 * tf.reduce_mean(tf.square(z_e_f32 - tf.stop_gradient(z_q_f32)))
+        # VQ-VAE commitment loss: updates both encoder and codebook
+        commit_loss = tf.reduce_mean(tf.square(z_e - z_q))
 
-        loss = spectral_loss + codebook_loss + commit_loss
+        loss = audio_loss + commit_loss
     
     weights = (decoder.trainable_weights + 
                codebook.trainable_weights + 
@@ -82,8 +79,7 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r):
     
     return {
         'loss': loss,
-        'spectral_loss': spectral_loss,
-        'codebook_loss': codebook_loss,
+        'audio_loss': audio_loss,
         'commit_loss': commit_loss,
         'used': num_used,
         'reset': num_reset,
@@ -93,7 +89,7 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r):
 def main():
     parser = argparse.ArgumentParser(description='Train VQ-VAE encoder/decoder model')
     parser.add_argument('--model', type=str, required=True,
-                       choices=['vqvae_512', 'vqvae_128', 'vqvae_32'],
+                       choices=['vqvae_512', 'vqvae_128', 'vqvae_32', 'vqvae_8'],
                        help='Model preset name')
     parser.add_argument('--data-dir', type=str, required=True,
                        help='Directory containing training audio files')
@@ -109,10 +105,8 @@ def main():
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--code-reset-limit', type=int, default=32,
                        help='Codebook reset limit (default: 32)')
-    parser.add_argument('--fp16', action='store_true', default=True,
-                       help='Use mixed precision training (default: True)')
-    parser.add_argument('--no-fp16', dest='fp16', action='store_false',
-                       help='Disable mixed precision training')
+    parser.add_argument('--fp16', action='store_true', default=False,
+                       help='Use mixed precision training (default: False)')
     
     args = parser.parse_args()
     
@@ -178,8 +172,7 @@ def main():
     while True:
         start_time = time.time()
         loss_acc = AverageAccumulator()
-        spectral_loss_acc = AverageAccumulator()
-        codebook_loss_acc = AverageAccumulator()
+        audio_loss_acc = AverageAccumulator()
         commit_loss_acc = AverageAccumulator()
         nreset = 0
         
@@ -188,8 +181,7 @@ def main():
             result = train_step(encoder, decoder, codebook, opt, restarter, args.fp16, batch)
             
             loss_acc.add(result['loss'])
-            spectral_loss_acc.add(result['spectral_loss'])
-            codebook_loss_acc.add(result['codebook_loss'])
+            audio_loss_acc.add(result['audio_loss'])
             commit_loss_acc.add(result['commit_loss'])
             nreset += np.sum(result['reset'])
             
@@ -205,9 +197,9 @@ def main():
                 current_lr = float(lr_value(opt.iterations))
             else:
                 current_lr = float(lr_value)
-            print('Epoch=%04d Step=%04d Time=%s LR=%+.4e Loss=%+.4e Spectral-Loss=%+.4e Codebook-Loss=%+.4e Commit-Loss=%+.4e Used=%05d Reset=%07d  ' % 
-                  (epoch, step, etime, current_lr, loss_acc.get(), spectral_loss_acc.get(), 
-                   codebook_loss_acc.get(), commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
+            print('Epoch=%04d Step=%04d Time=%s LR=%+.4e Loss=%+.4e Audio-Loss=%+.4e Commit-Loss=%+.4e Used=%05d Reset=%07d  ' % 
+                  (epoch, step, etime, current_lr, loss_acc.get(), audio_loss_acc.get(), 
+                   commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
         print()
         
         # Save weights with model name prefix: {model_name}_{component}_{epoch}.weights.h5
