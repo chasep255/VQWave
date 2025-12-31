@@ -111,11 +111,13 @@ class Generator(Model):
         
         # Add context if provided (concatenate or add - using add for simplicity)
         if context_dim is not None:
-            # Project context to match embedding dim if needed
-            if context_dim != embedding_dim:
-                context_proj = layers.Dense(embedding_dim, use_bias=False, name='context_projection')(input_context)
-            else:
-                context_proj = input_context
+            # Project context to match embedding dimension
+            # Context comes from ELU layer, so we project it before adding to embeddings
+            context_proj = layers.Conv1D(
+                embedding_dim, 1,
+                use_bias=False,
+                name='context_projection'
+            )(input_context)
             # Add context to embeddings
             # Note: ContextModel upsamples 4x, so context sequence length should match codes length
             x = x + context_proj
@@ -137,6 +139,13 @@ class Generator(Model):
             name='lstm_2'
         )
         x = lstm2(x)
+        
+        # Hidden layer before output (Conv1D with kernel=1 acts like Dense)
+        x = layers.Conv1D(
+            lstm_units, 1,
+            activation='elu',
+            name='output_hidden'
+        )(x)
         
         # Output logits over codebook (one logit per code)
         outputs = layers.Conv1D(
