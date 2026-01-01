@@ -39,6 +39,8 @@ venv.bak/
 .project
 .pydevproject
 .cache
+pyrightconfig.json
+.python-version
 
 # Jupyter Notebook
 .ipynb_checkpoints
