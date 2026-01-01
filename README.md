@@ -154,6 +154,7 @@ python3 scripts/train_vqvae.py \
     [--input-length 65536] \
     [--steps 10000] \
     [--output-dir weights] \
+    [--warmup-steps 1000] \
     [--fp16]
 ```
 
@@ -183,8 +184,14 @@ python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/data
 python3 scripts/train_vqvae.py \
     --model vqvae_512 \
     --data-dir /path/to/data \
-    --start-epoch 5  # Resume from epoch 5
+    --start-epoch 5 \
+    --warmup-steps 1000  # Optional: warmup LR from 0 over first 1000 steps
 ```
+
+**Learning Rate Warmup:**
+- Use `--warmup-steps N` to gradually increase learning rate from 0 to target LR over N steps
+- Helps initialize the internal state of the optimizer when resuming training
+- Default: 0 (no warmup)
 
 **After Training:**
 Once training is complete, copy your final weights to the `final_weights/` directory (remove the epoch number from the filename):
@@ -248,8 +255,14 @@ cp weights/generator_512_context_00010.weights.h5 weights/generator_512_context.
 python3 scripts/train_generator.py \
     --generator generator_512 \
     --data-dir /path/to/data \
-    --start-epoch 4  # Resume from epoch 4
+    --start-epoch 4 \
+    --warmup-steps 1000  # Optional: warmup LR from 0 over first 1000 steps
 ```
+
+**Learning Rate Warmup:**
+- Use `--warmup-steps N` to gradually increase learning rate from 0 to target LR over N steps
+- Helps initialize the internal state of the optimizer when resuming training
+- Default: 0 (no warmup)
 
 ## Generation
 

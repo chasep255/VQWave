@@ -19,7 +19,7 @@ from tensorflow.keras import mixed_precision
 from lib.encoder import Encoder, Decoder, CodebookManager
 from lib.config import ENCODER_CONFIGS, SAMPLE_RATE
 from lib.audio import AudioDataset
-from lib.util import AverageAccumulator, CodebookRestarter
+from lib.util import AverageAccumulator, CodebookRestarter, LRWarmupWrapper
 
 
 # GPU setup
@@ -99,6 +99,8 @@ def main():
                        help='Batch size (default: 8)')
     parser.add_argument('--start-epoch', type=int, default=0,
                        help='Starting epoch number (default: 0)')
+    parser.add_argument('--warmup-steps', type=int, default=0,
+                       help='Number of warmup steps for learning rate (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=2**16,
                        help='Input audio length in samples (default: 65536)')
     parser.add_argument('--steps', type=int, default=10000,
@@ -151,9 +153,20 @@ def main():
     print('%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
     
     # Setup optimizer with learning rate schedule
-    lr = tf.keras.optimizers.schedules.ExponentialDecay(2e-4, args.steps * 10, 0.5)
+    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(2e-4, args.steps * 10, 0.5)
+    
+    # Add warmup if requested
+    start_step = args.start_epoch * args.steps
+    if args.warmup_steps > 0:
+        # growth_rate = 1 / warmup_steps to reach full LR after warmup_steps
+        growth_rate = 1.0 / args.warmup_steps
+        lr = LRWarmupWrapper(base_lr, growth_rate=growth_rate, initial_step=start_step)
+        print(f"Using LR warmup for first {args.warmup_steps} steps from LR=0 (starting from step {start_step})")
+    else:
+        lr = base_lr
+    
     opt = tf.keras.optimizers.Adam(lr)
-    opt.iterations.assign(args.start_epoch * args.steps)
+    opt.iterations.assign(start_step)
     if args.fp16:
         opt = tf.keras.mixed_precision.LossScaleOptimizer(opt, dynamic_growth_steps=512)
     
