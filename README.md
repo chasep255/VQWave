@@ -121,7 +121,7 @@ Convert your audio files to the `.u16` format used for training.
 Use [`scripts/prepare_audio.py`](scripts/prepare_audio.py) to convert audio files:
 
 ```bash
-python3 scripts/prepare_audio.py <source_dir> <dest_dir> [--sample-rate 22050]
+python3 scripts/prepare_audio.py <source_dir> <dest_dir> [--sample-rate 22050] [--with-meta]
 ```
 
 **Example:**
@@ -131,10 +131,19 @@ python3 scripts/prepare_audio.py \
     /path/to/destination/u16/files
 ```
 
+**With metadata extraction:**
+```bash
+python3 scripts/prepare_audio.py \
+    /path/to/source/audio/files \
+    /path/to/destination/u16/files \
+    --with-meta
+```
+
 The script:
 - Converts all audio files to mono, 22050 Hz sample rate
 - Saves as 16-bit unsigned integer (`.u16`) format
 - Skips files that already exist in the destination
+- With `--with-meta`: Extracts metadata (artist, title, album, etc.) and saves as `{filename}.meta.json` files
 
 **Note**: Files are processed using ffmpeg. Ensure all input files are valid and accessible.
 
