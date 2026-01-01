@@ -17,7 +17,9 @@ class ContextModel(Model):
     to condition higher-res generation (e.g., 128x).
     """
     
-    def __init__(self, num_codes, embedding_dim=64, context_dim=512, context_channels=512, name='context_model', **kwargs):
+    def __init__(self, num_codes, embedding_dim=64, context_dim=512, context_channels=512,
+                 context_dilations=None, context_kernel_size=3,
+                 context_activation='elu', context_upsample_factor=4, name='context_model', **kwargs):
         """
         Initialize ContextModel with configuration.
         
@@ -26,7 +28,16 @@ class ContextModel(Model):
             embedding_dim: Dimension of code embeddings
             context_dim: Dimension of output context features
             context_channels: Number of channels in intermediate dilated CNN layers
+            context_dilations: List of dilation rates for each layer (default: [1, 2, 4, 8, 16, 32])
+            context_kernel_size: Kernel size for dilated conv layers
+            context_activation: Activation function for conv layers
+            context_upsample_factor: Upsample factor (e.g., 4 for 4x upsampling)
         """
+        if context_dilations is None:
+            context_dilations = [1, 2, 4, 8, 16, 32]
+        
+        context_layers = len(context_dilations)
+        
         # Define input (variable length sequence of lower-res integer codes)
         input_codes = Input((None,), dtype='int32', name='context_codes_input')
         
@@ -35,20 +46,23 @@ class ContextModel(Model):
         
         # Dilated CNN layers for large receptive field
         # Start with smaller dilation, increase for wider context
-        x = layers.Conv1D(context_channels, 3, padding='same', activation='elu', name='context_conv1')(x)
-        x = layers.Conv1D(context_channels, 3, padding='same', dilation_rate=2, activation='elu', name='context_conv2')(x)
-        x = layers.Conv1D(context_channels, 3, padding='same', dilation_rate=4, activation='elu', name='context_conv3')(x)
-        x = layers.Conv1D(context_channels, 3, padding='same', dilation_rate=8, activation='elu', name='context_conv4')(x)
-        x = layers.Conv1D(context_channels, 3, padding='same', dilation_rate=16, activation='elu', name='context_conv5')(x)
-        x = layers.Conv1D(context_channels, 3, padding='same', dilation_rate=32, activation='elu', name='context_conv6')(x)
-
+        for i, dilation in enumerate(context_dilations):
+            x = layers.Conv1D(
+                context_channels,
+                context_kernel_size,
+                padding='same',
+                dilation_rate=dilation,
+                activation=context_activation,
+                name=f'context_conv{i+1}'
+            )(x)
         
-        # Upsample 4x with transpose convolution
+        # Upsample with transpose convolution
         outputs = layers.Conv1DTranspose(
-            context_dim, 4,
-            strides=4,
+            context_dim,
+            context_upsample_factor,
+            strides=context_upsample_factor,
             padding='same',
-            activation='elu',
+            activation=context_activation,
             dtype='float32',
             name='context_output'
         )(x)
@@ -58,6 +72,11 @@ class ContextModel(Model):
         self.embedding_dim = embedding_dim
         self.context_dim = context_dim
         self.context_channels = context_channels
+        self.context_layers = context_layers
+        self.context_dilations = context_dilations
+        self.context_kernel_size = context_kernel_size
+        self.context_activation = context_activation
+        self.context_upsample_factor = context_upsample_factor
 
 
 class Generator(Model):
@@ -244,6 +263,10 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
         context_embedding_dim = source_vqvae["code_dim"]
         context_dim = config.get("context_dim", 512)
         context_channels = config.get("context_channels", 512)
+        context_dilations = config.get("context_dilations", [1, 2, 4, 8, 16, 32])
+        context_kernel_size = config.get("context_kernel_size", 3)
+        context_activation = config.get("context_activation", "elu")
+        context_upsample_factor = config.get("context_upsample_factor", 4)
         
         # Create context model
         context_model = ContextModel(
@@ -251,6 +274,10 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
             embedding_dim=context_embedding_dim,
             context_dim=context_dim,
             context_channels=context_channels,
+            context_dilations=context_dilations,
+            context_kernel_size=context_kernel_size,
+            context_activation=context_activation,
+            context_upsample_factor=context_upsample_factor,
             name=f"{config_name}_context"
         )
         

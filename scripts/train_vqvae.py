@@ -103,10 +103,16 @@ def main():
                        help='Number of warmup steps for learning rate (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=2**16,
                        help='Input audio length in samples (default: 65536)')
-    parser.add_argument('--steps', type=int, default=10000,
+    parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--code-reset-limit', type=int, default=32,
                        help='Codebook reset limit (default: 32)')
+    parser.add_argument('--learning-rate', '--lr', type=float, default=2e-4,
+                       help='Initial learning rate (default: 2e-4)')
+    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.5,
+                       help='Learning rate decay rate (default: 0.5, halves every decay_steps)')
+    parser.add_argument('--decay-steps', type=int, default=None,
+                       help='Number of steps for each decay (default: steps * 10)')
     parser.add_argument('--fp16', action='store_true', default=False,
                        help='Use mixed precision training (default: False)')
     
@@ -136,15 +142,14 @@ def main():
     # Load weights if resuming training
     if args.start_epoch > 0:
         model_prefix = args.model
-        prev_epoch = args.start_epoch - 1
         encoder.load_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_encoder_{prev_epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
         )
         decoder.load_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_decoder_{prev_epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
         )
         codebook.load_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_codebook_{prev_epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
         )
     
     # Load dataset
@@ -153,10 +158,13 @@ def main():
     print('%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
     
     # Setup optimizer with learning rate schedule
-    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(2e-4, args.steps * 10, 0.5)
+    decay_steps = args.decay_steps if args.decay_steps is not None else args.epoch_steps * 10
+    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(
+        args.learning_rate, decay_steps, args.decay_rate
+    )
     
     # Add warmup if requested
-    start_step = args.start_epoch * args.steps
+    start_step = args.start_epoch * args.epoch_steps
     if args.warmup_steps > 0:
         # growth_rate = 1 / warmup_steps to reach full LR after warmup_steps
         growth_rate = 1.0 / args.warmup_steps
@@ -189,7 +197,7 @@ def main():
         commit_loss_acc = AverageAccumulator()
         nreset = 0
         
-        for step in range(args.steps):
+        for step in range(args.epoch_steps):
             batch = data.random_batch(args.batch_size, args.input_length)[0]
             result = train_step(encoder, decoder, codebook, opt, restarter, args.fp16, batch)
             
@@ -198,7 +206,7 @@ def main():
             commit_loss_acc.add(result['commit_loss'])
             nreset += np.sum(result['reset'])
             
-            etime = int(args.steps * ((time.time() - start_time) / (step + 1)))
+            etime = int(args.epoch_steps * ((time.time() - start_time) / (step + 1)))
             etime = '%02d:%02d:%02d' % (etime // 3600, (etime // 60) % 60, etime % 60)
             # Get learning rate - handle both schedule and wrapped optimizer
             if hasattr(opt, 'inner_optimizer'):
@@ -215,16 +223,16 @@ def main():
                    commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
         print()
         
-        # Save weights with model name prefix: {model_name}_{component}_{epoch}.weights.h5
+        # Save weights without epoch numbers (overwrites each epoch)
         model_prefix = args.model
         encoder.save_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_encoder_{epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
         )
         decoder.save_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_decoder_{epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
         )
         codebook.save_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_codebook_{epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
         )
         
         epoch += 1

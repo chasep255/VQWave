@@ -122,24 +122,39 @@ GENERATOR_CONFIGS = {
         "source_vqvae": "vqvae_512",  # Context from 512x codes
         "dest_vqvae": "vqvae_128",  # Generates codes for 128x compression
         "lstm_units": 512,
+        "lstm_layers": 2,
+        # Context model configuration
         "context_dim": 512,  # Output dimension of context features
         "context_channels": 512,  # Intermediate channels in context model dilated CNN
-        "lstm_layers": 2,
+        "context_dilations": [1, 2, 4, 8, 16, 32],  # Dilation rates for each layer
+        "context_kernel_size": 3,  # Kernel size for dilated conv layers
+        "context_activation": "elu",  # Activation function
+        "context_upsample_factor": 4,  # Upsample factor (512x -> 128x = 4x)
     },
     "generator_32": {
         "source_vqvae": "vqvae_128",  # Context from 128x codes
         "dest_vqvae": "vqvae_32",  # Generates codes for 32x compression
-        "lstm_units": 512,
-        "context_dim": 512,  # Output dimension of context features
-        "context_channels": 512,  # Intermediate channels in context model dilated CNN
+        "lstm_units": 256,
         "lstm_layers": 2,
+        # Context model configuration
+        "context_dim": 256,  # Output dimension of context features
+        "context_channels": 256,  # Intermediate channels in context model dilated CNN
+        "context_dilations": [1, 2, 4, 8, 16, 32, 64],  # Dilation rates for each layer
+        "context_kernel_size": 3,  # Kernel size for dilated conv layers
+        "context_activation": "elu",  # Activation function
+        "context_upsample_factor": 4,  # Upsample factor (128x -> 32x = 4x)
     },
     "generator_8": {
         "source_vqvae": "vqvae_32",  # Context from 32x codes
         "dest_vqvae": "vqvae_8",  # Generates codes for 8x compression
-        "lstm_units": 512,
-        "context_dim": 512,  # Output dimension of context features
-        "context_channels": 512,  # Intermediate channels in context model dilated CNN
+        "lstm_units": 256,
         "lstm_layers": 2,
+        # Context model configuration
+        "context_dim": 256,  # Output dimension of context features
+        "context_channels": 256,  # Intermediate channels in context model dilated CNN
+        "context_dilations": [1, 2, 4, 8, 16, 32, 64],  # Dilation rates for each layer
+        "context_kernel_size": 3,  # Kernel size for dilated conv layers
+        "context_activation": "elu",  # Activation function
+        "context_upsample_factor": 4,  # Upsample factor (32x -> 8x = 4x)
     },
 }

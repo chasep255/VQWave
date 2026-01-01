@@ -115,8 +115,8 @@ def main():
                        help='Generator config name')
     parser.add_argument('--data-dir', type=str, required=True,
                        help='Directory containing training audio files')
-    parser.add_argument('--vqvae-weights-dir', type=str, default='final_weights',
-                       help='Directory with VQ-VAE weights (default: final_weights)')
+    parser.add_argument('--vqvae-weights-dir', type=str, default='weights',
+                       help='Directory with VQ-VAE weights (default: weights)')
     parser.add_argument('--output-dir', type=str, default='weights',
                        help='Directory to save generator weights (default: weights)')
     parser.add_argument('--batch-size', type=int, default=8,
@@ -127,8 +127,14 @@ def main():
                        help='Number of warmup steps for learning rate (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=2**16,
                        help='Input audio length in samples (default: 65536)')
-    parser.add_argument('--steps', type=int, default=10000,
+    parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
+    parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
+                       help='Initial learning rate (default: 1e-3)')
+    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.5,
+                       help='Learning rate decay rate (default: 0.5, halves every decay_steps)')
+    parser.add_argument('--decay-steps', type=int, default=None,
+                       help='Number of steps for each decay (default: steps * 10)')
     parser.add_argument('--fp16', action='store_true', default=False,
                        help='Use mixed precision training (default: False)')
     
@@ -205,15 +211,14 @@ def main():
     
     # Load generator/context weights if resuming
     if args.start_epoch > 0:
-        prev_epoch = args.start_epoch - 1
         generator.load_weights(
-            os.path.join(args.output_dir, f'{args.generator}_generator_{prev_epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{args.generator}_generator.weights.h5')
         )
         if context_model is not None:
             context_model.load_weights(
-                os.path.join(args.output_dir, f'{args.generator}_context_{prev_epoch:05d}.weights.h5')
+                os.path.join(args.output_dir, f'{args.generator}_context.weights.h5')
             )
-        print(f"Loaded weights from epoch {prev_epoch}")
+        print(f"Resuming training from epoch {args.start_epoch}")
     
     # Load dataset
     data = AudioDataset(args.data_dir)
@@ -221,10 +226,13 @@ def main():
     print(f'\n%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
     
     # Setup optimizer with learning rate schedule
-    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(1e-3, args.steps * 10, 0.5)
+    decay_steps = args.decay_steps if args.decay_steps is not None else args.epoch_steps * 10
+    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(
+        args.learning_rate, decay_steps, args.decay_rate
+    )
     
     # Add warmup if requested
-    start_step = args.start_epoch * args.steps
+    start_step = args.start_epoch * args.epoch_steps
     if args.warmup_steps > 0:
         # growth_rate = 1 / warmup_steps to reach full LR after warmup_steps
         growth_rate = 1.0 / args.warmup_steps
@@ -248,7 +256,7 @@ def main():
         loss_acc = AverageAccumulator()
         accuracy_acc = AverageAccumulator()
         
-        for step in range(args.steps):
+        for step in range(args.epoch_steps):
             batch = data.random_batch(args.batch_size, args.input_length)[0]
             result = train_step(
                 dest_encoder, dest_codebook, generator, context_model,
@@ -258,7 +266,7 @@ def main():
             loss_acc.add(result['loss'])
             accuracy_acc.add(result['accuracy'])
             
-            etime = int(args.steps * ((time.time() - start_time) / (step + 1)))
+            etime = int(args.epoch_steps * ((time.time() - start_time) / (step + 1)))
             etime = '%02d:%02d:%02d' % (etime // 3600, (etime // 60) % 60, etime % 60)
             # Get learning rate - handle both schedule and wrapped optimizer
             if hasattr(opt, 'inner_optimizer'):
@@ -273,13 +281,13 @@ def main():
                   (epoch, step, etime, current_lr, loss_acc.get(), accuracy_acc.get()), end='\r')
         print()
         
-        # Save weights
+        # Save weights without epoch numbers (overwrites each epoch)
         generator.save_weights(
-            os.path.join(args.output_dir, f'{args.generator}_generator_{epoch:05d}.weights.h5')
+            os.path.join(args.output_dir, f'{args.generator}_generator.weights.h5')
         )
         if context_model is not None:
             context_model.save_weights(
-                os.path.join(args.output_dir, f'{args.generator}_context_{epoch:05d}.weights.h5')
+                os.path.join(args.output_dir, f'{args.generator}_context.weights.h5')
             )
         
         epoch += 1

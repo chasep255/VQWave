@@ -46,13 +46,10 @@ pyrightconfig.json
 .ipynb_checkpoints
 
 # Model files and checkpoints
-weights/
 old/
-# Allow final_weights/ to be committed (pre-trained models)
-!final_weights/
 *.h5
-# Allow .h5 files in final_weights/
-!final_weights/**/*.h5
+# Allow .h5 files in weights/ (trained model weights)
+!weights/**/*.h5
 *.ckpt
 *.pb
 *.pkl

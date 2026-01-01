@@ -161,11 +161,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate 1024 codes using generator_512 from final_weights (no epoch needed)
+  # Generate 1024 codes using generator_512
   %(prog)s --generators generator_512 --length 1024
-
-  # Generate from specific epoch
-  %(prog)s --generators generator_512 --epoch 10 --length 1024
 
   # Generate with temperature sampling
   %(prog)s --generators generator_512 --length 1024 --temperature 0.9
@@ -176,15 +173,13 @@ Examples:
   # Generate using all 4 levels hierarchically
   %(prog)s --generators all --length 1024
 
-  # Generate using 2 levels (512 and 128)
-  %(prog)s --generators generator_512,generator_128 --length 1024
+  # Generate using 2 levels with different weight directories
+  %(prog)s --generators generator_512,generator_128 --length 1024 --generator-weights-dir "generator_512:weights,generator_128:other_dir"
         """
     )
     
     parser.add_argument('--generators', type=str, required=True,
                        help='Comma-separated generator names or "all" (e.g., "generator_512" or "generator_512,generator_128" or "all")')
-    parser.add_argument('--epoch', type=int, default=None,
-                       help='Epoch number for generator weights (default: None, loads from final_weights without epoch)')
     parser.add_argument('--length', type=int, required=True,
                        help='Number of codes to generate at the final level (outer codes)')
     parser.add_argument('--temperature', type=float, default=0.9,
@@ -193,10 +188,10 @@ Examples:
                        help='Top-k sampling (overrides temperature if set)')
     parser.add_argument('--seed', type=int, default=None,
                        help='Random seed for first code (random if not specified)')
-    parser.add_argument('--vqvae-weights-dir', type=str, default='final_weights',
-                       help='Directory with VQ-VAE weights (default: final_weights)')
-    parser.add_argument('--generator-weights-dir', type=str, default='final_weights',
-                       help='Directory with generator weights (default: final_weights)')
+    parser.add_argument('--vqvae-weights-dir', type=str, default='weights',
+                       help='Directory with VQ-VAE weights (default: weights)')
+    parser.add_argument('--generator-weights-dir', type=str, default='weights',
+                       help='Directory with generator weights (default: weights). Can specify per-generator: generator_512:weights,generator_128:other_dir')
     parser.add_argument('--output', type=str, default=None,
                        help='Save audio to file (optional, otherwise plays)')
     parser.add_argument('--no-gpu', action='store_true',
@@ -248,6 +243,19 @@ Examples:
     
     print(f"Generating with generators: {', '.join(generator_names)}")
     
+    # Parse per-generator weight directories
+    generator_weights_map = {}
+    if ':' in args.generator_weights_dir:
+        # Format: generator_512:weights,generator_128:other_dir
+        for mapping in args.generator_weights_dir.split(','):
+            if ':' in mapping:
+                gen, dir_path = mapping.split(':', 1)
+                generator_weights_map[gen.strip()] = dir_path.strip()
+    else:
+        # Single directory for all generators
+        for gen in generator_names:
+            generator_weights_map[gen] = args.generator_weights_dir
+    
     # Load VQ-VAE models and generators
     vqvae_models = {}
     generators = {}
@@ -293,26 +301,25 @@ Examples:
         # Create and load generator
         generator, context_model = create_generator(gen_name, stateful=True, batch_size=1)
         
-        # Build weight filenames (with or without epoch)
-        if args.epoch is not None:
-            generator_weight_file = f'{gen_name}_generator_{args.epoch:05d}.weights.h5'
-            context_weight_file = f'{gen_name}_context_{args.epoch:05d}.weights.h5'
-        else:
-            generator_weight_file = f'{gen_name}_generator.weights.h5'
-            context_weight_file = f'{gen_name}_context.weights.h5'
+        # Determine weight directory for this generator
+        weights_dir = generator_weights_map.get(gen_name, args.generator_weights_dir)
+        
+        # Load weights (always without epoch numbers)
+        generator_weight_file = f'{gen_name}_generator.weights.h5'
+        context_weight_file = f'{gen_name}_context.weights.h5'
         
         generator.load_weights(
-            os.path.join(args.generator_weights_dir, generator_weight_file)
+            os.path.join(weights_dir, generator_weight_file)
         )
         
         if context_model is not None:
             context_model.load_weights(
-                os.path.join(args.generator_weights_dir, context_weight_file)
+                os.path.join(weights_dir, context_weight_file)
             )
         
         generators[gen_name] = generator
         context_models[gen_name] = context_model
-        print(f"Loaded generator: {gen_name}")
+        print(f"Loaded generator: {gen_name} from {weights_dir}")
     
     # Determine final compression rate (lowest = most detailed)
     final_gen_name = generator_names[-1]
