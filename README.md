@@ -2,6 +2,8 @@
 
 A hierarchical Vector Quantized Variational Autoencoder (VQ-VAE) system for music generation. VQWave uses multi-level compression and autoregressive LSTM generators to create audio samples.
 
+> **Note**: This project is under active development and may be incomplete. Some features and documentation are still being refined.
+
 ## Features
 
 - **Hierarchical Compression**: Four compression levels (512x, 128x, 32x, 8x) for multi-scale audio representation
