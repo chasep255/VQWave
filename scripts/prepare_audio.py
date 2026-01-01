@@ -5,7 +5,7 @@ import sys
 
 import numpy as np
 
-from lib.audio import load_audio
+from vqwave.audio import load_audio
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Convert audio files to .u16 format for training')

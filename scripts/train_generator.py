@@ -16,11 +16,11 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import mixed_precision
 
-from lib.encoder import Encoder, CodebookManager
-from lib.generator import create_generator
-from lib.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
-from lib.audio import AudioDataset
-from lib.util import AverageAccumulator, LRWarmupWrapper
+from vqwave.encoder import Encoder, CodebookManager
+from vqwave.generator import create_generator
+from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
+from vqwave.audio import AudioDataset
+from vqwave.util import AverageAccumulator, LRWarmupWrapper
 
 
 # GPU setup
@@ -221,7 +221,7 @@ def main():
     print(f'\n%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
     
     # Setup optimizer with learning rate schedule
-    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(2e-4, args.steps * 10, 0.5)
+    base_lr = tf.keras.optimizers.schedules.ExponentialDecay(1e-3, args.steps * 10, 0.5)
     
     # Add warmup if requested
     start_step = args.start_epoch * args.steps
@@ -233,7 +233,7 @@ def main():
     else:
         lr = base_lr
     
-    opt = tf.keras.optimizers.Adam(lr)
+    opt = tf.keras.optimizers.Adam(lr, clipnorm=1.0)
     opt.iterations.assign(start_step)
     if args.fp16:
         opt = tf.keras.mixed_precision.LossScaleOptimizer(opt, dynamic_growth_steps=512)

@@ -16,10 +16,10 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import mixed_precision
 
-from lib.encoder import Encoder, Decoder, CodebookManager
-from lib.config import ENCODER_CONFIGS, SAMPLE_RATE
-from lib.audio import AudioDataset
-from lib.util import AverageAccumulator, CodebookRestarter, LRWarmupWrapper
+from vqwave.encoder import Encoder, Decoder, CodebookManager
+from vqwave.config import ENCODER_CONFIGS, SAMPLE_RATE
+from vqwave.audio import AudioDataset
+from vqwave.util import AverageAccumulator, CodebookRestarter, LRWarmupWrapper
 
 
 # GPU setup

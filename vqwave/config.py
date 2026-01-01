@@ -115,27 +115,31 @@ GENERATOR_CONFIGS = {
     "generator_512": {
         "source_vqvae": None,  # Unconditional generation
         "dest_vqvae": "vqvae_512",  # Generates codes for 512x compression
-        "lstm_units": 1024,
+        "lstm_units": 512,
+        "lstm_layers": 2,
     },
     "generator_128": {
         "source_vqvae": "vqvae_512",  # Context from 512x codes
         "dest_vqvae": "vqvae_128",  # Generates codes for 128x compression
-        "lstm_units": 1024,
+        "lstm_units": 512,
         "context_dim": 512,  # Output dimension of context features
         "context_channels": 512,  # Intermediate channels in context model dilated CNN
+        "lstm_layers": 2,
     },
     "generator_32": {
         "source_vqvae": "vqvae_128",  # Context from 128x codes
         "dest_vqvae": "vqvae_32",  # Generates codes for 32x compression
-        "lstm_units": 1024,
+        "lstm_units": 512,
         "context_dim": 512,  # Output dimension of context features
         "context_channels": 512,  # Intermediate channels in context model dilated CNN
+        "lstm_layers": 2,
     },
     "generator_8": {
         "source_vqvae": "vqvae_32",  # Context from 32x codes
         "dest_vqvae": "vqvae_8",  # Generates codes for 8x compression
-        "lstm_units": 1024,
+        "lstm_units": 512,
         "context_dim": 512,  # Output dimension of context features
         "context_channels": 512,  # Intermediate channels in context model dilated CNN
+        "lstm_layers": 2,
     },
 }

@@ -121,4 +121,3 @@ class Codebook(layers.Layer):
         
     def gather(self, i):
         return tf.gather(self.codes, i)
-

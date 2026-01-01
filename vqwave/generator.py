@@ -6,7 +6,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Input, Model
 
-from lib.config import ENCODER_CONFIGS, GENERATOR_CONFIGS
+from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS
 
 
 class ContextModel(Model):
@@ -69,8 +69,8 @@ class Generator(Model):
     Supports both training (non-stateful) and inference (stateful) modes.
     """
     
-    def __init__(self, num_codes, embedding_dim=64, lstm_units=1024, context_dim=None, 
-                 stateful=False, batch_size=None, name='generator', **kwargs):
+    def __init__(self, num_codes, embedding_dim=64, lstm_units=1024, lstm_layers=2, 
+                 context_dim=None, stateful=False, batch_size=None, name='generator', **kwargs):
         """
         Initialize Generator with configuration.
         
@@ -78,6 +78,7 @@ class Generator(Model):
             num_codes: Size of codebook (vocab size for prediction)
             embedding_dim: Dimension of code embeddings
             lstm_units: Number of units in each LSTM layer
+            lstm_layers: Number of stacked LSTM layers
             context_dim: Dimension of context features (if None, no context conditioning)
             stateful: If True, LSTM layers are stateful (for inference mode)
             batch_size: Batch size (required if stateful=True)
@@ -122,23 +123,17 @@ class Generator(Model):
             # Note: ContextModel upsamples 4x, so context sequence length should match codes length
             x = x + context_proj
         
-        # First LSTM layer (stateful for inference mode)
-        lstm1 = layers.LSTM(
-            lstm_units,
-            return_sequences=True,
-            stateful=stateful,
-            name='lstm_1'
-        )
-        x = lstm1(x)
-        
-        # Second LSTM layer (stateful for inference mode)
-        lstm2 = layers.LSTM(
-            lstm_units,
-            return_sequences=True,
-            stateful=stateful,
-            name='lstm_2'
-        )
-        x = lstm2(x)
+        # Stacked LSTM layers (stateful for inference mode)
+        lstm_layers_list = []
+        for i in range(lstm_layers):
+            lstm_layer = layers.LSTM(
+                lstm_units,
+                return_sequences=True,
+                stateful=stateful,
+                name=f'lstm_{i+1}'
+            )
+            lstm_layers_list.append(lstm_layer)
+            x = lstm_layer(x)
         
         # Hidden layer before output (Conv1D with kernel=1 acts like Dense)
         x = layers.Conv1D(
@@ -158,11 +153,11 @@ class Generator(Model):
         self.num_codes = num_codes
         self.embedding_dim = embedding_dim
         self.lstm_units = lstm_units
+        self.lstm_layers = lstm_layers
         self.context_dim = context_dim
         self.stateful = stateful
         self.batch_size = batch_size
-        self.lstm1 = lstm1
-        self.lstm2 = lstm2
+        self.lstm_layers_list = lstm_layers_list
     
     def reset_states(self):
         """
@@ -171,30 +166,31 @@ class Generator(Model):
         """
         if not self.stateful:
             raise RuntimeError("reset_states() can only be called when stateful=True")
-        self.lstm1.reset_states()
-        self.lstm2.reset_states()
+        for lstm_layer in self.lstm_layers_list:
+            lstm_layer.reset_states()
     
     def get_states(self):
         """
         Get current LSTM states (for stateful inference mode).
-        Returns tuple of (lstm1_state, lstm2_state) where each state is (h, c).
+        Returns tuple of states, one per LSTM layer, where each state is (h, c).
         """
         if not self.stateful:
             raise RuntimeError("get_states() can only be called when stateful=True")
-        return (self.lstm1.states, self.lstm2.states)
+        return tuple(lstm_layer.states for lstm_layer in self.lstm_layers_list)
     
     def set_states(self, states):
         """
         Set LSTM states (for stateful inference mode).
         
         Args:
-            states: Tuple of (lstm1_state, lstm2_state) where each state is (h, c).
+            states: Tuple of states, one per LSTM layer, where each state is (h, c).
         """
         if not self.stateful:
             raise RuntimeError("set_states() can only be called when stateful=True")
-        lstm1_state, lstm2_state = states
-        self.lstm1.states = lstm1_state
-        self.lstm2.states = lstm2_state
+        if len(states) != len(self.lstm_layers_list):
+            raise ValueError(f"Expected {len(self.lstm_layers_list)} states, got {len(states)}")
+        for lstm_layer, state in zip(self.lstm_layers_list, states):
+            lstm_layer.states = state
 
 
 def create_generator(generator_config, stateful=False, batch_size=None, name=None):
@@ -231,6 +227,7 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
     num_codes = dest_vqvae["num_codes"]
     embedding_dim = dest_vqvae["code_dim"]
     lstm_units = config["lstm_units"]
+    lstm_layers = config.get("lstm_layers", 2)
     
     # Check if we need context
     source_vqvae_key = config.get("source_vqvae")
@@ -262,6 +259,7 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
             num_codes=num_codes,
             embedding_dim=embedding_dim,
             lstm_units=lstm_units,
+            lstm_layers=lstm_layers,
             context_dim=context_dim,
             stateful=stateful,
             batch_size=batch_size,
@@ -275,6 +273,7 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
             num_codes=num_codes,
             embedding_dim=embedding_dim,
             lstm_units=lstm_units,
+            lstm_layers=lstm_layers,
             context_dim=None,
             stateful=stateful,
             batch_size=batch_size,

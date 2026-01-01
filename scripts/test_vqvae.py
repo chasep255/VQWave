@@ -13,9 +13,9 @@ import numpy as np
 import pyaudio
 import tensorflow as tf
 
-from lib.encoder import Encoder, Decoder, CodebookManager
-from lib.config import ENCODER_CONFIGS, SAMPLE_RATE
-from lib.audio import load_audio, save_audio
+from vqwave.encoder import Encoder, Decoder, CodebookManager
+from vqwave.config import ENCODER_CONFIGS, SAMPLE_RATE
+from vqwave.audio import load_audio, save_audio
 
 
 def main():

@@ -1,4 +1,4 @@
-# VQVAE Audio Generator Library
+# VQWave Library
 
 from .layers import (
     CausalQueue,

@@ -58,7 +58,7 @@ Each level uses:
 - **Encoder**: Convolutional layers that compress audio to latent codes
 - **Codebook**: Vector quantization with 1024 code vectors (32-dim each)
 - **Decoder**: Transposed convolutions that reconstruct audio from quantized codes
-- **Generator**: 2-layer LSTM that predicts next code autoregressively
+- **Generator**: Configurable LSTM layers (default: 2 layers, 512 units each) that predict next code autoregressively
 
 ### Generation Process
 
@@ -82,7 +82,7 @@ Generation proceeds hierarchically:
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone git@github.com:chasep255/VQWave.git
 cd VQWave
 ```
 
@@ -178,6 +178,7 @@ python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/data
 - Codebook restart mechanism prevents code collapse
 - Saves weights after each epoch
 - Supports mixed precision training (`--fp16`)
+- Gradient clipping (clipnorm=1.0) applied automatically
 
 **Resume Training:**
 ```bash
@@ -213,32 +214,34 @@ python3 scripts/train_generator.py \
     --generator generator_512 \
     --data-dir /path/to/audio/u16/files \
     --vqvae-weights-dir final_weights \
-    [--batch-size 16] \
-    [--input-length 262144] \
+    [--batch-size 8] \
+    [--input-length 65536] \
     [--steps 10000] \
+    [--warmup-steps 1000] \
     [--fp16]
 ```
 
-Train in order (each depends on the previous):
+Train all generators (can be done in parallel, as they only depend on VQ-VAE weights):
 ```bash
-# 1. Train unconditional 512x generator
+# Train unconditional 512x generator
 python3 scripts/train_generator.py --generator generator_512 --data-dir /path/to/data
 
-# 2. Train 128x generator (conditioned on 512x)
+# Train 128x generator (conditioned on 512x VQ-VAE codes)
 python3 scripts/train_generator.py --generator generator_128 --data-dir /path/to/data
 
-# 3. Train 32x generator (conditioned on 128x)
+# Train 32x generator (conditioned on 128x VQ-VAE codes)
 python3 scripts/train_generator.py --generator generator_32 --data-dir /path/to/data
 
-# 4. Train 8x generator (conditioned on 32x)
+# Train 8x generator (conditioned on 32x VQ-VAE codes)
 python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/data
 ```
 
 **Training Details:**
-- Generators predict next code in sequence using 2-layer LSTM
+- Generators predict next code in sequence using configurable LSTM layers (default: 2 layers, 512 units each)
 - Context models process lower-res codes with dilated CNNs
 - Uses sparse categorical crossentropy loss
 - VQ-VAE models are frozen during generator training
+- Gradient clipping (clipnorm=1.0) applied automatically
 
 **After Training:**
 Once generator training is complete, copy your final weights to the `weights/` directory (remove the epoch number from the filename):
@@ -319,7 +322,7 @@ python3 scripts/generate_audio.py --generators all
 
 ## Configuration
 
-Model configurations are defined in [`lib/config.py`](lib/config.py).
+Model configurations are defined in [`vqwave/config.py`](vqwave/config.py).
 
 ### VQ-VAE Configs
 
@@ -342,7 +345,7 @@ Each config specifies:
 - `generator_8`: Conditioned on 32x codes, generates 8x codes
 
 Each generator uses:
-- 2-layer LSTM (1024 units each)
+- Configurable LSTM layers (default: 2 layers, 512 units each, configurable via `lstm_layers` and `lstm_units` in config)
 - Code embeddings (32-dim, matching codebook dimension)
 - Optional context model (dilated CNN + upsampling)
 
@@ -350,13 +353,13 @@ Each generator uses:
 
 ```
 VQWave/
-├── lib/                    # Core modules
+├── vqwave/                 # Core modules
 │   ├── encoder.py         # VQ-VAE encoder/decoder/codebook
 │   ├── generator.py       # LSTM generators and context models
-│   ├── audio.py        # Audio loading and processing
-│   ├── config.py          # Model configurations
-│   ├── layers.py          # Custom layers (codebook)
-│   └── util.py            # Utilities (accumulators, restarters)
+│   ├── audio.py            # Audio loading and processing
+│   ├── config.py           # Model configurations
+│   ├── layers.py           # Custom layers (codebook, etc.)
+│   └── util.py             # Utilities (accumulators, LR warmup, etc.)
 ├── scripts/               # Training and generation scripts
 │   ├── prepare_audio.py   # Convert audio to .u16 format
 │   ├── train_vqvae.py     # Train VQ-VAE models
@@ -374,27 +377,6 @@ VQWave/
 ```
 
 ## Troubleshooting
-
-### Bus Errors with Memory-Mapped Files
-
-If you encounter "Bus error (core dumped)" during training:
-
-1. **Check for corrupt files**: The error may indicate a corrupted audio file or bad disk sectors
-   ```bash
-   # Check system logs for I/O errors
-   dmesg | grep -i "error\|fail\|bad\|sector" | tail -20
-   ```
-
-2. **Filter short files**: Ensure files are long enough for your input length
-   - Training scripts automatically filter files shorter than `input_length`
-   - Files must be at least `input_length` samples (e.g., 262144 samples ≈ 11.9 seconds at 22050 Hz)
-
-3. **Check disk health**: If errors persist, check for bad sectors on the drive
-   - Use `dmesg` to identify problematic sectors
-   - Consider replacing the drive if errors are frequent
-
-4. **File descriptor limits**: Already handled automatically in training scripts
-   - Scripts increase the file descriptor limit to handle many mmap'd files
 
 ### GPU Memory Issues
 
@@ -430,13 +412,19 @@ python3 scripts/train_vqvae.py --model vqvae_128 --data-dir /path/to/training/da
 python3 scripts/train_vqvae.py --model vqvae_32 --data-dir /path/to/training/data
 python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/training/data
 
-# 3. Train generators (sequentially, each depends on previous)
+# 3. Copy best VQ-VAE weights to final_weights/ (remove epoch number from filename)
+cp weights/vqvae_512_encoder_00010.weights.h5 final_weights/vqvae_512_encoder.weights.h5
+cp weights/vqvae_512_decoder_00010.weights.h5 final_weights/vqvae_512_decoder.weights.h5
+cp weights/vqvae_512_codebook_00010.weights.h5 final_weights/vqvae_512_codebook.weights.h5
+# Repeat for vqvae_128, vqvae_32, vqvae_8 with your chosen epoch
+
+# 4. Train generators (can be done in parallel, they only depend on VQ-VAE weights)
 python3 scripts/train_generator.py --generator generator_512 --data-dir /path/to/training/data
 python3 scripts/train_generator.py --generator generator_128 --data-dir /path/to/training/data
 python3 scripts/train_generator.py --generator generator_32 --data-dir /path/to/training/data
 python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/training/data
 
-# 4. Generate audio
+# 5. Generate audio
 python3 scripts/generate_audio.py \
     --generators all \
     --length 50000 \

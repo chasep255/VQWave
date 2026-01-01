@@ -13,9 +13,9 @@ import sys
 import numpy as np
 import tensorflow as tf
 
-from lib.encoder import Encoder, Decoder, CodebookManager
-from lib.generator import create_generator
-from lib.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
+from vqwave.encoder import Encoder, Decoder, CodebookManager
+from vqwave.generator import create_generator
+from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
 
 
 @tf.function
@@ -393,7 +393,7 @@ Examples:
     # Save or play
     if args.output:
         print(f"Saving audio to: {args.output}")
-        from lib.audio import save_audio
+        from vqwave.audio import save_audio
         save_audio(args.output, SAMPLE_RATE, audio)
         print("Done!")
     else:

@@ -6,8 +6,8 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Input, Model
 
-from lib.layers import Codebook
-from lib.config import ENCODER_CONFIGS
+from vqwave.layers import Codebook
+from vqwave.config import ENCODER_CONFIGS
 
 
 class Encoder(Model):
