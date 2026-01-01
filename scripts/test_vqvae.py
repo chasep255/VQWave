@@ -25,13 +25,13 @@ def main():
         epilog="""
 Examples:
   # Test with default settings
-  %(prog)s --audio song.mp3 --model vqvae_128 --epoch 100
+  %(prog)s --audio song.mp3 --model vqvae_128
 
   # Save output to file instead of playing
-  %(prog)s --audio song.mp3 --model vqvae_128 --epoch 100 --output reconstructed.wav
+  %(prog)s --audio song.mp3 --model vqvae_128 --output reconstructed.wav
 
   # Test with different weights directory
-  %(prog)s --audio song.mp3 --model vqvae_512 --epoch 50 --weights-dir custom_weights
+  %(prog)s --audio song.mp3 --model vqvae_512 --weights-dir custom_weights
         """
     )
     
@@ -40,8 +40,6 @@ Examples:
     parser.add_argument('--model', type=str, required=True,
                        choices=['vqvae_512', 'vqvae_128', 'vqvae_32', 'vqvae_8'],
                        help='Model preset name')
-    parser.add_argument('--epoch', type=int, required=True,
-                       help='Epoch number to load weights from')
     parser.add_argument('--weights-dir', type=str, default='weights',
                        help='Directory containing model weights (default: weights)')
     parser.add_argument('--output', type=str, default=None,
@@ -75,14 +73,13 @@ Examples:
     decoder = Decoder(config)
     codebook = CodebookManager(config)
     
-    # Load weights
+    # Load weights (without epoch numbers)
     model_prefix = args.model
     weights_dir = args.weights_dir
-    epoch_str = f'{args.epoch:05d}'
     
-    encoder_path = os.path.join(weights_dir, f'{model_prefix}_encoder_{epoch_str}.weights.h5')
-    decoder_path = os.path.join(weights_dir, f'{model_prefix}_decoder_{epoch_str}.weights.h5')
-    codebook_path = os.path.join(weights_dir, f'{model_prefix}_codebook_{epoch_str}.weights.h5')
+    encoder_path = os.path.join(weights_dir, f'{model_prefix}_encoder.weights.h5')
+    decoder_path = os.path.join(weights_dir, f'{model_prefix}_decoder.weights.h5')
+    codebook_path = os.path.join(weights_dir, f'{model_prefix}_codebook.weights.h5')
     
     if not os.path.exists(encoder_path):
         print(f"Error: Encoder weights not found: {encoder_path}")
@@ -94,7 +91,7 @@ Examples:
         print(f"Error: Codebook weights not found: {codebook_path}")
         sys.exit(1)
     
-    print(f"Loading weights from epoch {args.epoch}...")
+    print(f"Loading weights from {weights_dir}...")
     encoder.load_weights(encoder_path)
     decoder.load_weights(decoder_path)
     codebook.load_weights(codebook_path)
