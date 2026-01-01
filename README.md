@@ -161,7 +161,10 @@ python3 scripts/train_vqvae.py \
     --data-dir /path/to/audio/u16/files \
     [--batch-size 8] \
     [--input-length 65536] \
-    [--steps 10000] \
+    [--epoch-steps 10000] \
+    [--learning-rate 2e-4] \
+    [--decay-rate 0.5] \
+    [--decay-steps <steps*10>] \
     [--output-dir weights] \
     [--warmup-steps 1000] \
     [--fp16]
@@ -185,9 +188,10 @@ python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/data
 **Training Details:**
 - Uses multi-scale STFT loss for reconstruction quality
 - Codebook restart mechanism prevents code collapse
-- Saves weights after each epoch
+- Saves weights after each epoch (overwrites previous weights, no epoch numbers in filenames)
 - Supports mixed precision training (`--fp16`)
 - Gradient clipping (clipnorm=1.0) applied automatically
+- Configurable learning rate schedule: `--learning-rate`, `--decay-rate`, `--decay-steps`
 
 **Resume Training:**
 ```bash
@@ -203,16 +207,7 @@ python3 scripts/train_vqvae.py \
 - Helps initialize the internal state of the optimizer when resuming training
 - Default: 0 (no warmup)
 
-**After Training:**
-Once training is complete, copy your final weights to the `final_weights/` directory (remove the epoch number from the filename):
-```bash
-cp weights/vqvae_512_encoder_00010.weights.h5 final_weights/vqvae_512_encoder.weights.h5
-cp weights/vqvae_512_decoder_00010.weights.h5 final_weights/vqvae_512_decoder.weights.h5
-cp weights/vqvae_512_codebook_00010.weights.h5 final_weights/vqvae_512_codebook.weights.h5
-# Repeat for vqvae_128, vqvae_32, vqvae_8 with your chosen epoch
-```
-
-**Note**: Pre-trained VQ-VAE weights are provided in the `final_weights/` directory. You can skip VQ-VAE training and proceed directly to generator training if desired.
+**Note**: Weights are automatically saved to the `weights/` directory without epoch numbers. Each epoch overwrites the previous weights. Pre-trained VQ-VAE weights are provided in the `weights/` directory.
 
 ### Stage 2: Train Generators
 
@@ -222,10 +217,13 @@ Train autoregressive generators hierarchically using [`scripts/train_generator.p
 python3 scripts/train_generator.py \
     --generator generator_512 \
     --data-dir /path/to/audio/u16/files \
-    --vqvae-weights-dir final_weights \
+    --vqvae-weights-dir weights \
     [--batch-size 8] \
     [--input-length 65536] \
-    [--steps 10000] \
+    [--epoch-steps 10000] \
+    [--learning-rate 1e-3] \
+    [--decay-rate 0.5] \
+    [--decay-steps <steps*10>] \
     [--warmup-steps 1000] \
     [--fp16]
 ```
@@ -247,20 +245,14 @@ python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/d
 
 **Training Details:**
 - Generators predict next code in sequence using configurable LSTM layers (default: 2 layers, 512 units each)
-- Context models process lower-res codes with dilated CNNs
+- Context models process lower-res codes with dilated CNNs (fully configurable: dilations, kernel size, activation, upsample factor)
 - Uses sparse categorical crossentropy loss
 - VQ-VAE models are frozen during generator training
 - Gradient clipping (clipnorm=1.0) applied automatically
+- Configurable learning rate schedule: `--learning-rate`, `--decay-rate`, `--decay-steps`
+- Weights saved without epoch numbers (overwrites each epoch)
 
-**After Training:**
-Once generator training is complete, copy your final weights to the `final_weights/` directory (remove the epoch number from the filename):
-```bash
-cp weights/generator_512_generator_00010.weights.h5 final_weights/generator_512_generator.weights.h5
-cp weights/generator_512_context_00010.weights.h5 final_weights/generator_512_context.weights.h5
-# Repeat for generator_128, generator_32, generator_8 with your chosen epoch
-```
-
-**Note**: Pre-trained generator weights are also provided in the `final_weights/` directory. You can skip generator training and use my weights.
+**Note**: Weights are automatically saved to the `weights/` directory. Pre-trained generator weights are provided in the `weights/` directory.
 
 **Resume Training:**
 ```bash
@@ -283,9 +275,8 @@ Generate audio using trained models with [`scripts/generate_audio.py`](scripts/g
 ```bash
 python3 scripts/generate_audio.py \
     --generators generator_512,generator_128,generator_32,generator_8 \
-    [--vqvae-weights-dir final_weights] \
-    [--generator-weights-dir final_weights] \
-    [--epoch 10] \
+    [--vqvae-weights-dir weights] \
+    [--generator-weights-dir weights] \
     [--length 10000] \
     [--temperature 1.0] \
     [--top-k 0] \
@@ -293,11 +284,9 @@ python3 scripts/generate_audio.py \
 ```
 
 **Weight Loading:**
-- **With `--epoch` flag**: Loads weights with epoch numbers from `--generator-weights-dir` (e.g., `generator_512_generator_00010.weights.h5`)
-  - Use this when testing weights from `weights/` directory during training
-- **Without `--epoch` flag**: Loads weights without epoch numbers from `--generator-weights-dir` (e.g., `generator_512_generator.weights.h5`)
-  - Use this when using final weights from `final_weights/` directory
-- By default, both `--vqvae-weights-dir` and `--generator-weights-dir` default to `final_weights/`
+- All weights are loaded without epoch numbers from `--generator-weights-dir` (e.g., `generator_512_generator.weights.h5`)
+- By default, both `--vqvae-weights-dir` and `--generator-weights-dir` default to `weights/`
+- You can specify different directories per generator: `--generator-weights-dir "generator_512:weights,generator_128:other_dir"`
 
 ### Sampling Methods
 
@@ -344,7 +333,6 @@ Test VQ-VAE reconstruction quality using [`scripts/test_vqvae.py`](scripts/test_
 python3 scripts/test_vqvae.py \
     --audio /path/to/audio/file.mp3 \
     --model vqvae_128 \
-    [--epoch 10] \
     [--weights-dir weights] \
     [--output reconstructed.wav] \
     [--max-length 30] \
@@ -354,27 +342,17 @@ python3 scripts/test_vqvae.py \
 **Arguments:**
 - `--audio`: Input audio file (mp3, wav, m4a, etc.)
 - `--model`: VQ-VAE model to test (`vqvae_512`, `vqvae_128`, `vqvae_32`, `vqvae_8`)
-- `--epoch`: Epoch number to load weights from (required if using `weights/` directory, omit if using `final_weights/`)
 - `--weights-dir`: Directory containing weights (default: `weights`)
 - `--output`: Save reconstructed audio to file (default: plays audio)
 - `--max-length`: Maximum audio length in seconds (default: no limit)
 - `--no-gpu`: Run on CPU instead of GPU
 
-**Examples:**
+**Example:**
 ```bash
-# Test after training (step 2) - use epoch flag with weights/ directory
 python3 scripts/test_vqvae.py \
     --audio song.mp3 \
     --model vqvae_128 \
-    --epoch 10 \
     --weights-dir weights \
-    --output reconstructed.wav
-
-# Test after copying to final_weights (step 3) - no epoch flag needed
-python3 scripts/test_vqvae.py \
-    --audio song.mp3 \
-    --model vqvae_128 \
-    --weights-dir final_weights \
     --output reconstructed.wav
 ```
 
@@ -383,18 +361,9 @@ python3 scripts/test_vqvae.py \
 You can test generator quality by generating audio samples:
 
 ```bash
-# Test after training (step 4) - use --epoch flag with weights/ directory
 python3 scripts/generate_audio.py \
     --generators generator_512 \
     --generator-weights-dir weights \
-    --epoch 10 \
-    --length 10000 \
-    --output test_512.wav
-
-# Test after copying to final_weights (step 5) - omit --epoch flag
-python3 scripts/generate_audio.py \
-    --generators generator_512 \
-    --generator-weights-dir final_weights \
     --length 10000 \
     --output test_512.wav
 ```
@@ -426,7 +395,7 @@ Each config specifies:
 Each generator uses:
 - Configurable LSTM layers (default: 2 layers, 512 units each, configurable via `lstm_layers` and `lstm_units` in config)
 - Code embeddings (32-dim, matching codebook dimension)
-- Optional context model (dilated CNN + upsampling)
+- Optional context model (fully configurable: dilations, kernel size, activation, upsample factor)
 
 ## Project Structure
 
@@ -445,18 +414,12 @@ VQWave/
 │   ├── train_generator.py # Train generators
 │   ├── generate_audio.py # Generate audio samples
 │   └── test_vqvae.py     # Test VQ-VAE reconstruction
-├── final_weights/         # Final trained weights (VQ-VAE and generators)
+├── weights/               # Trained model weights (VQ-VAE and generators)
 │   ├── vqvae_*_encoder.weights.h5
 │   ├── vqvae_*_decoder.weights.h5
 │   ├── vqvae_*_codebook.weights.h5
 │   ├── generator_*_generator.weights.h5
 │   └── generator_*_context.weights.h5
-├── weights/               # Training output (weights with epoch numbers)
-│   ├── vqvae_*_encoder_*.weights.h5
-│   ├── vqvae_*_decoder_*.weights.h5
-│   ├── vqvae_*_codebook_*.weights.h5
-│   ├── generator_*_generator_*.weights.h5
-│   └── generator_*_context_*.weights.h5
 └── setup.py              # Package configuration
 ```
 
@@ -496,34 +459,19 @@ python3 scripts/train_vqvae.py --model vqvae_128 --data-dir /path/to/training/da
 python3 scripts/train_vqvae.py --model vqvae_32 --data-dir /path/to/training/data
 python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/training/data
 
-# 3. Copy best VQ-VAE weights to final_weights/ (remove epoch number from filename)
-cp weights/vqvae_512_encoder_00010.weights.h5 final_weights/vqvae_512_encoder.weights.h5
-cp weights/vqvae_512_decoder_00010.weights.h5 final_weights/vqvae_512_decoder.weights.h5
-cp weights/vqvae_512_codebook_00010.weights.h5 final_weights/vqvae_512_codebook.weights.h5
-# Repeat for vqvae_128, vqvae_32, vqvae_8 with your chosen epoch
+# Optional: Test VQ-VAE
+python3 scripts/test_vqvae.py --audio /path/to/test/audio.mp3 --model vqvae_128 --weights-dir weights --output reconstructed.wav
 
-# Optional: Test VQ-VAE after step 2 (with --epoch) or after step 3 (without --epoch)
-python3 scripts/test_vqvae.py --audio /path/to/test/audio.mp3 --model vqvae_128 --epoch 10 --weights-dir weights
-# or after copying:
-python3 scripts/test_vqvae.py --audio /path/to/test/audio.mp3 --model vqvae_128 --weights-dir final_weights
-
-# 4. Train generators (can be done in parallel, they only depend on VQ-VAE weights)
+# 3. Train generators (can be done in parallel, they only depend on VQ-VAE weights)
 python3 scripts/train_generator.py --generator generator_512 --data-dir /path/to/training/data
 python3 scripts/train_generator.py --generator generator_128 --data-dir /path/to/training/data
 python3 scripts/train_generator.py --generator generator_32 --data-dir /path/to/training/data
 python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/training/data
 
-# 5. Copy best generator weights to final_weights/ (remove epoch number from filename)
-cp weights/generator_512_generator_00010.weights.h5 final_weights/generator_512_generator.weights.h5
-cp weights/generator_512_context_00010.weights.h5 final_weights/generator_512_context.weights.h5
-# Repeat for generator_128, generator_32, generator_8 with your chosen epoch
+# Optional: Test generators
+python3 scripts/generate_audio.py --generators generator_512 --generator-weights-dir weights --length 10000 --output test.wav
 
-# Optional: Test generators after step 4 (with --epoch flag) or after step 5 (without --epoch flag)
-python3 scripts/generate_audio.py --generators generator_512 --generator-weights-dir weights --epoch 10 --length 10000 --output test.wav
-# or after copying to final_weights:
-python3 scripts/generate_audio.py --generators generator_512 --generator-weights-dir final_weights --length 10000 --output test.wav
-
-# 6. Generate audio (defaults to final_weights/ for both VQ-VAE and generator weights)
+# 4. Generate audio (defaults to weights/ for both VQ-VAE and generator weights)
 python3 scripts/generate_audio.py \
     --generators all \
     --length 50000 \
