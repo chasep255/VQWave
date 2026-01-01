@@ -1,11 +1,11 @@
-"""Setup configuration for VQVAEAudioGenerator package."""
+"""Setup configuration for VQWave package."""
 
 from setuptools import setup, find_packages
 
 setup(
-    name='vqvae-audio-generator',
+    name='vqwave',
     version='0.1.0',
-    description='VQVAE Audio Generator',
+    description='VQWave - Hierarchical VQ-VAE for Music Generation',
     packages=find_packages(),
     python_requires='>=3.8',
     install_requires=[

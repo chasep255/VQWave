@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup script for VQVAEAudioGenerator project
+# Setup script for VQWave project
 # Creates a Python virtual environment and installs dependencies
 
 set -e
@@ -7,7 +7,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/venv"
 
-echo "Setting up VQVAEAudioGenerator environment..."
+echo "Setting up VQWave environment..."
 
 # Check if Python 3 is available
 if ! command -v python3 &> /dev/null; then
