@@ -191,7 +191,7 @@ Examples:
     parser.add_argument('--vqvae-weights-dir', type=str, default='weights',
                        help='Directory with VQ-VAE weights (default: weights)')
     parser.add_argument('--generator-weights-dir', type=str, default='weights',
-                       help='Directory with generator weights (default: weights). Can specify per-generator: generator_512:weights,generator_128:other_dir')
+                       help='Directory with generator weights (default: weights)')
     parser.add_argument('--output', type=str, default=None,
                        help='Save audio to file (optional, otherwise plays)')
     parser.add_argument('--play-intermediates', action='store_true',
@@ -245,19 +245,6 @@ Examples:
     
     print(f"Generating with generators: {', '.join(generator_names)}")
     
-    # Parse per-generator weight directories
-    generator_weights_map = {}
-    if ':' in args.generator_weights_dir:
-        # Format: generator_512:weights,generator_128:other_dir
-        for mapping in args.generator_weights_dir.split(','):
-            if ':' in mapping:
-                gen, dir_path = mapping.split(':', 1)
-                generator_weights_map[gen.strip()] = dir_path.strip()
-    else:
-        # Single directory for all generators
-        for gen in generator_names:
-            generator_weights_map[gen] = args.generator_weights_dir
-    
     # Load VQ-VAE models and generators
     vqvae_models = {}
     generators = {}
@@ -303,25 +290,22 @@ Examples:
         # Create and load generator
         generator, context_model = create_generator(gen_name, stateful=True, batch_size=1)
         
-        # Determine weight directory for this generator
-        weights_dir = generator_weights_map.get(gen_name, args.generator_weights_dir)
-        
         # Load weights (always without epoch numbers)
         generator_weight_file = f'{gen_name}_generator.weights.h5'
         context_weight_file = f'{gen_name}_context.weights.h5'
         
         generator.load_weights(
-            os.path.join(weights_dir, generator_weight_file)
+            os.path.join(args.generator_weights_dir, generator_weight_file)
         )
         
         if context_model is not None:
             context_model.load_weights(
-                os.path.join(weights_dir, context_weight_file)
+                os.path.join(args.generator_weights_dir, context_weight_file)
             )
         
         generators[gen_name] = generator
         context_models[gen_name] = context_model
-        print(f"Loaded generator: {gen_name} from {weights_dir}")
+        print(f"Loaded generator: {gen_name} from {args.generator_weights_dir}")
     
     # Determine outer (first) and final compression rates
     outer_gen_name = generator_names[0]  # First generator (highest compression, e.g., 512x)

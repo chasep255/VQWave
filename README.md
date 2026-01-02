@@ -188,7 +188,9 @@ python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/data
 **Training Details:**
 - Uses multi-scale STFT loss for reconstruction quality
 - Codebook restart mechanism prevents code collapse
-- Saves weights after each epoch (overwrites previous weights, no epoch numbers in filenames)
+- Saves weights only when loss improves (best loss tracking). Weights are saved without epoch numbers in filenames.
+- First epoch always saves (initial best loss = infinity)
+- Subsequent epochs only save if current loss < best loss
 - Supports mixed precision training (`--fp16`)
 - Gradient clipping (clipnorm=1.0) applied automatically
 - Configurable learning rate schedule: `--learning-rate`, `--decay-rate`, `--decay-steps`
@@ -207,7 +209,7 @@ python3 scripts/train_vqvae.py \
 - Helps initialize the internal state of the optimizer when resuming training
 - Default: 0 (no warmup)
 
-**Note**: Weights are automatically saved to the `weights/` directory without epoch numbers. Each epoch overwrites the previous weights. Pre-trained VQ-VAE weights are provided in the `weights/` directory.
+**Note**: Weights are automatically saved to the `weights/` directory without epoch numbers. Weights are only saved when the loss improves (best loss tracking), ensuring you always have the best-performing checkpoint. The training script will print messages indicating whether weights were saved or skipped each epoch. Pre-trained VQ-VAE weights are provided in the `weights/` directory.
 
 ### Stage 2: Train Generators
 
@@ -250,9 +252,11 @@ python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/d
 - VQ-VAE models are frozen during generator training
 - Gradient clipping (clipnorm=1.0) applied automatically
 - Configurable learning rate schedule: `--learning-rate`, `--decay-rate`, `--decay-steps`
-- Weights saved without epoch numbers (overwrites each epoch)
+- Saves weights only when loss improves (best loss tracking). Weights are saved without epoch numbers in filenames.
+- First epoch always saves (initial best loss = infinity)
+- Subsequent epochs only save if current loss < best loss
 
-**Note**: Weights are automatically saved to the `weights/` directory. Pre-trained generator weights are provided in the `weights/` directory.
+**Note**: Weights are automatically saved to the `weights/` directory without epoch numbers. Weights are only saved when the loss improves (best loss tracking), ensuring you always have the best-performing checkpoint. The training script will print messages indicating whether weights were saved or skipped each epoch. Pre-trained generator weights are provided in the `weights/` directory.
 
 **Resume Training:**
 ```bash
@@ -275,22 +279,36 @@ Generate audio using trained models with [`scripts/generate_audio.py`](scripts/g
 ```bash
 python3 scripts/generate_audio.py \
     --generators generator_512,generator_128,generator_32,generator_8 \
+    --length 10000 \
     [--vqvae-weights-dir weights] \
     [--generator-weights-dir weights] \
-    [--length 10000] \
-    [--temperature 1.0] \
-    [--top-k 0] \
-    [--output output.wav]
+    [--temperature 0.9] \
+    [--top-k 40] \
+    [--seed <int>] \
+    [--play-intermediates] \
+    [--output output.wav] \
+    [--no-gpu]
 ```
+
+**Arguments:**
+- `--generators`: Comma-separated generator names or "all" (required)
+- `--length`: Number of codes to generate at the first/outer layer (highest compression, e.g., 512x). Subsequent levels calculated automatically (required)
+- `--vqvae-weights-dir`: Directory with VQ-VAE weights (default: `weights`)
+- `--generator-weights-dir`: Directory with generator weights (default: `weights`)
+- `--temperature`: Temperature for sampling (default: `0.9`)
+- `--top-k`: Top-k sampling, overrides temperature if set (default: `None`)
+- `--seed`: Random seed for first code (default: random)
+- `--play-intermediates`: Play intermediate audio at each generation level
+- `--output`: Save audio to file (default: plays audio)
+- `--no-gpu`: Disable GPU (use CPU only)
 
 **Weight Loading:**
 - All weights are loaded without epoch numbers from `--generator-weights-dir` (e.g., `generator_512_generator.weights.h5`)
 - By default, both `--vqvae-weights-dir` and `--generator-weights-dir` default to `weights/`
-- You can specify different directories per generator: `--generator-weights-dir "generator_512:weights,generator_128:other_dir"`
 
 ### Sampling Methods
 
-- **Temperature sampling**: `--temperature 1.0` (default)
+- **Temperature sampling**: `--temperature 0.9` (default)
   - Lower = more deterministic, Higher = more random
   
 - **Top-k sampling**: `--top-k 40`
@@ -323,6 +341,7 @@ python3 scripts/generate_audio.py --generators all
 
 - If `--output` is specified, saves to file
 - Otherwise, plays audio using pyaudio
+- Use `--play-intermediates` to hear audio decoded at each intermediate generation level (useful for debugging)
 - Use `--no-gpu` to run on CPU (slower)
 
 ## Testing VQ-VAE
@@ -475,7 +494,7 @@ python3 scripts/generate_audio.py --generators generator_512 --generator-weights
 python3 scripts/generate_audio.py \
     --generators all \
     --length 50000 \
-    --temperature 1.0 \
+    --temperature 0.9 \
     --output generated.wav
 ```
 
