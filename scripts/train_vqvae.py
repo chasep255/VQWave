@@ -32,6 +32,7 @@ soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
 
+# Loss function library
 @tf.function
 def stft_loss(y, r):
     """Compute multi-scale STFT loss."""
@@ -44,8 +45,70 @@ def stft_loss(y, r):
     return loss
 
 
+@tf.function
+def mel_loss(y, r, sample_rate=22050, n_fft=2048, hop_length=512, n_mels=80):
+    """
+    Compute mel spectrogram loss (not log mel).
+    
+    Args:
+        y: Generated audio [batch, samples]
+        r: Reference audio [batch, samples]
+        sample_rate: Audio sample rate (default: 22050)
+        n_fft: FFT window size (default: 2048)
+        hop_length: Hop length for STFT (default: 512)
+        n_mels: Number of mel filter banks (default: 80)
+    """
+    # Compute STFT magnitude spectrograms
+    y_stft = tf.signal.stft(y, n_fft, hop_length, fft_length=n_fft)
+    r_stft = tf.signal.stft(r, n_fft, hop_length, fft_length=n_fft)
+    
+    # Get magnitude spectrograms
+    y_mag = tf.abs(y_stft)
+    r_mag = tf.abs(r_stft)
+    
+    # Convert to mel scale
+    # Get mel weight matrix (shape: [n_fft//2 + 1, n_mels])
+    mel_weight_matrix = tf.signal.linear_to_mel_weight_matrix(
+        num_mel_bins=n_mels,
+        num_spectrogram_bins=n_fft // 2 + 1,
+        sample_rate=sample_rate,
+        lower_edge_hertz=0.0,
+        upper_edge_hertz=sample_rate / 2.0
+    )
+    
+    # Apply mel filter bank: [batch, time, freq] @ [freq, n_mels] -> [batch, time, n_mels]
+    # Use einsum for clarity: 'btf,fm->btm' where b=batch, t=time, f=freq, m=mel
+    y_mel = tf.einsum('btf,fm->btm', y_mag, mel_weight_matrix)
+    r_mel = tf.einsum('btf,fm->btm', r_mag, mel_weight_matrix)
+    
+    # Compute L1 loss on mel spectrograms (not log mel)
+    loss = tf.reduce_mean(tf.abs(y_mel - r_mel))
+    
+    return loss
 
-def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r):
+
+@tf.function
+def mse_loss(y, r):
+    """
+    Compute simple mean squared error loss on waveforms.
+    
+    Args:
+        y: Generated audio [batch, samples]
+        r: Reference audio [batch, samples]
+    """
+    return tf.reduce_mean(tf.square(y - r))
+
+
+# Loss function registry
+LOSS_FUNCTIONS = {
+    'stft': stft_loss,
+    'mel': mel_loss,
+    'mse': mse_loss,
+}
+
+
+
+def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r, loss_fn):
     """Single training step."""
     with tf.GradientTape() as tape:
         # Encode audio to latents
@@ -60,7 +123,11 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r):
         # Decode to audio
         y = decoder(z_q_st, training=True)
         
-        audio_loss = stft_loss(y, r)
+        # Compute audio reconstruction loss using selected loss function
+        if loss_fn == mel_loss:
+            audio_loss = loss_fn(y, r, sample_rate=SAMPLE_RATE)
+        else:
+            audio_loss = loss_fn(y, r)
 
         # VQ-VAE commitment loss: updates both encoder and codebook
         commit_loss = tf.reduce_mean(tf.square(z_e - z_q))
@@ -115,6 +182,9 @@ def main():
                        help='Number of steps for each decay (default: steps * 10)')
     parser.add_argument('--fp16', action='store_true', default=False,
                        help='Use mixed precision training (default: False)')
+    parser.add_argument('--loss', type=str, default='mse',
+                       choices=['stft', 'mel', 'mse'],
+                       help='Loss function to use: stft (multi-scale STFT), mel (mel spectrogram), or mse (mean squared error) (default: mse)')
     
     args = parser.parse_args()
     
@@ -185,6 +255,14 @@ def main():
         random_init=(args.start_epoch == 0)
     )
     
+    # Get loss function
+    if args.loss not in LOSS_FUNCTIONS:
+        available = ", ".join(LOSS_FUNCTIONS.keys())
+        raise ValueError(f"Unknown loss function '{args.loss}'. Available: {available}")
+    
+    loss_fn = LOSS_FUNCTIONS[args.loss]
+    print(f"Using loss function: {args.loss}")
+    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -200,7 +278,7 @@ def main():
         
         for step in range(args.epoch_steps):
             batch = data.random_batch(args.batch_size, args.input_length)[0]
-            result = train_step(encoder, decoder, codebook, opt, restarter, args.fp16, batch)
+            result = train_step(encoder, decoder, codebook, opt, restarter, args.fp16, batch, loss_fn)
             
             loss_acc.add(result['loss'])
             audio_loss_acc.add(result['audio_loss'])
