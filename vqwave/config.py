@@ -152,7 +152,7 @@ GENERATOR_CONFIGS = {
         # Context model configuration
         "context_dim": 256,  # Output dimension of context features
         "context_channels": 256,  # Intermediate channels in context model dilated CNN
-        "context_dilations": [1, 2, 4, 8, 16, 32, 64],  # Dilation rates for each layer
+        "context_dilations": [1, 2, 4, 8, 16, 32, 64, 128],  # Dilation rates for each layer
         "context_kernel_size": 3,  # Kernel size for dilated conv layers
         "context_activation": "elu",  # Activation function
         "context_upsample_factor": 4,  # Upsample factor (32x -> 8x = 4x)

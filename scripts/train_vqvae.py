@@ -190,6 +190,7 @@ def main():
     
     # Training loop
     epoch = args.start_epoch
+    best_loss = float('inf')
     while True:
         start_time = time.time()
         loss_acc = AverageAccumulator()
@@ -223,17 +224,29 @@ def main():
                    commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
         print()
         
-        # Save weights without epoch numbers (overwrites each epoch)
-        model_prefix = args.model
-        encoder.save_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
-        )
-        decoder.save_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
-        )
-        codebook.save_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
-        )
+        # Get average loss for this epoch
+        current_loss = loss_acc.get()
+        
+        # Save weights only if loss improved
+        if current_loss < best_loss:
+            prev_best = best_loss
+            best_loss = current_loss
+            model_prefix = args.model
+            if prev_best == float('inf'):
+                print(f"Saving weights (initial save, loss: {current_loss:.4e})")
+            else:
+                print(f"Saving weights (loss improved: {current_loss:.4e} < {prev_best:.4e})")
+            encoder.save_weights(
+                os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
+            )
+            decoder.save_weights(
+                os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
+            )
+            codebook.save_weights(
+                os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
+            )
+        else:
+            print(f"Skipping save (loss did not improve: {current_loss:.4e} >= {best_loss:.4e})")
         
         epoch += 1
 

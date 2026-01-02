@@ -251,6 +251,7 @@ def main():
     
     # Training loop
     epoch = args.start_epoch
+    best_loss = float('inf')
     while True:
         start_time = time.time()
         loss_acc = AverageAccumulator()
@@ -281,14 +282,26 @@ def main():
                   (epoch, step, etime, current_lr, loss_acc.get(), accuracy_acc.get()), end='\r')
         print()
         
-        # Save weights without epoch numbers (overwrites each epoch)
-        generator.save_weights(
-            os.path.join(args.output_dir, f'{args.generator}_generator.weights.h5')
-        )
-        if context_model is not None:
-            context_model.save_weights(
-                os.path.join(args.output_dir, f'{args.generator}_context.weights.h5')
+        # Get average loss for this epoch
+        current_loss = loss_acc.get()
+        
+        # Save weights only if loss improved
+        if current_loss < best_loss:
+            prev_best = best_loss
+            best_loss = current_loss
+            if prev_best == float('inf'):
+                print(f"Saving weights (initial save, loss: {current_loss:.4e})")
+            else:
+                print(f"Saving weights (loss improved: {current_loss:.4e} < {prev_best:.4e})")
+            generator.save_weights(
+                os.path.join(args.output_dir, f'{args.generator}_generator.weights.h5')
             )
+            if context_model is not None:
+                context_model.save_weights(
+                    os.path.join(args.output_dir, f'{args.generator}_context.weights.h5')
+                )
+        else:
+            print(f"Skipping save (loss did not improve: {current_loss:.4e} >= {best_loss:.4e})")
         
         epoch += 1
 

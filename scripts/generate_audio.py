@@ -181,7 +181,7 @@ Examples:
     parser.add_argument('--generators', type=str, required=True,
                        help='Comma-separated generator names or "all" (e.g., "generator_512" or "generator_512,generator_128" or "all")')
     parser.add_argument('--length', type=int, required=True,
-                       help='Number of codes to generate at the final level (outer codes)')
+                       help='Number of codes to generate at the first/outer layer (highest compression, e.g., 512x). Subsequent levels calculated automatically.')
     parser.add_argument('--temperature', type=float, default=0.9,
                        help='Temperature for sampling (default: 0.9)')
     parser.add_argument('--top-k', type=int, default=None,
@@ -194,6 +194,8 @@ Examples:
                        help='Directory with generator weights (default: weights). Can specify per-generator: generator_512:weights,generator_128:other_dir')
     parser.add_argument('--output', type=str, default=None,
                        help='Save audio to file (optional, otherwise plays)')
+    parser.add_argument('--play-intermediates', action='store_true',
+                       help='Play intermediate audio at each generation level')
     parser.add_argument('--no-gpu', action='store_true',
                        help='Disable GPU (use CPU only)')
     
@@ -321,20 +323,25 @@ Examples:
         context_models[gen_name] = context_model
         print(f"Loaded generator: {gen_name} from {weights_dir}")
     
-    # Determine final compression rate (lowest = most detailed)
-    final_gen_name = generator_names[-1]
+    # Determine outer (first) and final compression rates
+    outer_gen_name = generator_names[0]  # First generator (highest compression, e.g., 512x)
+    outer_vqvae_key = GENERATOR_CONFIGS[outer_gen_name]['dest_vqvae']
+    outer_compression = ENCODER_CONFIGS[outer_vqvae_key]['compression_rate']
+    
+    final_gen_name = generator_names[-1]  # Last generator (lowest compression, most detailed, e.g., 8x)
     final_vqvae_key = GENERATOR_CONFIGS[final_gen_name]['dest_vqvae']
     final_compression = ENCODER_CONFIGS[final_vqvae_key]['compression_rate']
     
-    # Length is number of codes at final level
-    num_codes = args.length
-    actual_audio_length = num_codes * final_compression
+    # Length always refers to the first/outer layer codes (highest compression)
+    num_codes = args.length  # This is the number of codes at the first/outer layer
+    actual_audio_length = num_codes * outer_compression
     
-    print(f"\nGenerating {num_codes} codes at final level")
-    print(f"Final compression: {final_compression}x")
+    print(f"\nGenerating {num_codes} codes at first/outer layer ({outer_compression}x compression)")
+    print(f"Final layer: {final_compression}x compression")
     print(f"Audio length: {actual_audio_length} samples ({actual_audio_length / SAMPLE_RATE:.2f} seconds)")
     
     # Generate codes hierarchically
+    # num_codes always refers to the first/outer layer (highest compression)
     current_codes = None
     
     for gen_name in generator_names:
@@ -345,8 +352,8 @@ Examples:
         
         # Calculate codes needed for this level
         # For hierarchical generation, each level needs codes proportional to its compression
-        # If final level needs num_codes, this level needs: num_codes * (final_compression / compression)
-        level_num_codes = math.ceil(num_codes * (final_compression / compression))
+        # If outer layer has num_codes, this level needs: num_codes * (outer_compression / compression)
+        level_num_codes = math.ceil(num_codes * (outer_compression / compression))
         
         print(f"\nGenerating {level_num_codes} codes at {compression}x compression ({gen_name})...")
         
@@ -375,6 +382,43 @@ Examples:
         )
         
         print(f"Generated {len(current_codes)} codes, unique: {len(set(current_codes))}")
+        
+        # Play intermediate audio if requested (skip last layer, it will be played at the end)
+        is_last_layer = (gen_name == generator_names[-1])
+        if args.play_intermediates and not is_last_layer:
+            print(f"Decoding intermediate audio at {compression}x compression...")
+            decoder = vqvae_models[dest_vqvae_key]['decoder']
+            codebook = vqvae_models[dest_vqvae_key]['codebook']
+            
+            # Decode current codes to audio
+            codes_tensor = tf.expand_dims(tf.constant(current_codes, dtype=tf.int32), 0)
+            code_vectors = codebook.gather(codes_tensor)
+            intermediate_audio = decoder(code_vectors, training=False)
+            intermediate_audio = intermediate_audio[0].numpy()
+            intermediate_audio = np.clip(intermediate_audio, -1.0, 1.0)
+            
+            # Trim to match expected length for this level
+            expected_length = len(current_codes) * compression
+            intermediate_audio = intermediate_audio[:expected_length]
+            
+            print(f"Playing intermediate audio: {len(intermediate_audio)} samples ({len(intermediate_audio) / SAMPLE_RATE:.2f} seconds)")
+            try:
+                import pyaudio
+                p = pyaudio.PyAudio()
+                stream = p.open(
+                    format=pyaudio.paFloat32,
+                    channels=1,
+                    rate=SAMPLE_RATE,
+                    output=True
+                )
+                stream.write(intermediate_audio.tobytes())
+                stream.stop_stream()
+                stream.close()
+                p.terminate()
+                print("Intermediate playback complete!")
+            except Exception as e:
+                print(f"Error during intermediate playback: {e}")
+                print("Skipping intermediate playback...")
     
     # Decode final codes to audio
     print(f"\nDecoding {len(current_codes)} codes to audio...")
