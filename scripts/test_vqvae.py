@@ -38,8 +38,8 @@ Examples:
     parser.add_argument('--audio', type=str, required=True,
                        help='Path to input audio file (mp3, wav, m4a, etc.)')
     parser.add_argument('--model', type=str, required=True,
-                       choices=['vqvae_512', 'vqvae_128', 'vqvae_32', 'vqvae_8'],
-                       help='Model preset name')
+                       choices=list(ENCODER_CONFIGS.keys()),
+                       help=f'Model preset name (choices: {", ".join(ENCODER_CONFIGS.keys())})')
     parser.add_argument('--weights-dir', type=str, default='weights',
                        help='Directory containing model weights (default: weights)')
     parser.add_argument('--output', type=str, default=None,
@@ -48,6 +48,8 @@ Examples:
                        help='Maximum audio length in seconds (default: no limit)')
     parser.add_argument('--no-gpu', action='store_true',
                        help='Disable GPU (use CPU only)')
+    parser.add_argument('--plot', action='store_true',
+                       help='Plot original and reconstructed waveforms in a GUI window')
     
     args = parser.parse_args()
     
@@ -134,6 +136,45 @@ Examples:
     
     print(f"Reconstructed audio length: {len(reconstructed_audio) / SAMPLE_RATE:.2f} seconds")
     print(f"Unique codes used: {len(set(codes.numpy().flatten()))} / {config['num_codes']}")
+    
+    # Plot waveforms if requested
+    if args.plot:
+        try:
+            import matplotlib.pyplot as plt
+            
+            # Trim both to same length for comparison
+            min_len = min(len(audio), len(reconstructed_audio))
+            audio_trimmed = audio[:min_len]
+            reconstructed_trimmed = reconstructed_audio[:min_len]
+            
+            # Create sample index axis
+            sample_axis = np.arange(min_len)
+            
+            # Create figure with single plot
+            fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+            
+            # Plot both waveforms on the same chart
+            ax.plot(sample_axis, audio_trimmed, 'b-', linewidth=0.5, alpha=0.7, label='Original')
+            ax.plot(sample_axis, reconstructed_trimmed, 'r-', linewidth=0.5, alpha=0.7, label='Reconstructed')
+            
+            ax.set_title(f'VQ-VAE Reconstruction Comparison ({args.model})', 
+                        fontsize=16, fontweight='bold')
+            ax.set_xlabel('Sample Index', fontsize=12)
+            ax.set_ylabel('Amplitude', fontsize=12)
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(-1.1, 1.1)
+            ax.legend(loc='upper right', fontsize=11)
+            
+            plt.tight_layout()
+            
+            print("Displaying waveform plot...")
+            plt.show()
+        except ImportError:
+            print("Error: matplotlib is not installed. Install it with: pip install matplotlib")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error creating plot: {e}")
+            print("Continuing without plot...")
     
     # Save or play
     if args.output:

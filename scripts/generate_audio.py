@@ -161,25 +161,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate 1024 codes using generator_512
-  %(prog)s --generators generator_512 --length 1024
+  # Generate codes using a generator
+  %(prog)s --generators generator_1024 --length 1024
 
   # Generate with temperature sampling
-  %(prog)s --generators generator_512 --length 1024 --temperature 0.9
+  %(prog)s --generators generator_1024 --length 1024 --temperature 0.9
 
   # Generate with top-k sampling
-  %(prog)s --generators generator_512 --length 1024 --top-k 50
+  %(prog)s --generators generator_1024 --length 1024 --top-k 50
 
-  # Generate using all 4 levels hierarchically
+  # Generate using all levels hierarchically
   %(prog)s --generators all --length 1024
 
-  # Generate using 2 levels with different weight directories
-  %(prog)s --generators generator_512,generator_128 --length 1024 --generator-weights-dir "generator_512:weights,generator_128:other_dir"
+  # Generate using multiple levels
+  %(prog)s --generators generator_1024,generator_128 --length 1024
         """
     )
     
     parser.add_argument('--generators', type=str, required=True,
-                       help='Comma-separated generator names or "all" (e.g., "generator_512" or "generator_512,generator_128" or "all")')
+                       help=f'Comma-separated generator names or "all" (available: {", ".join(GENERATOR_CONFIGS.keys())})')
     parser.add_argument('--length', type=int, required=True,
                        help='Number of codes to generate at the first/outer layer (highest compression, e.g., 512x). Subsequent levels calculated automatically.')
     parser.add_argument('--temperature', type=float, default=0.9,
@@ -211,7 +211,10 @@ Examples:
     
     # Parse generator list
     if args.generators.lower() == 'all':
-        generator_names = ['generator_512', 'generator_128', 'generator_32', 'generator_8']
+        # Use all generators, sorted by compression rate (highest first)
+        def get_compression_rate(name):
+            return int(GENERATOR_CONFIGS[name]['dest_vqvae'].replace('vqvae_', ''))
+        generator_names = sorted(GENERATOR_CONFIGS.keys(), key=get_compression_rate, reverse=True)
     else:
         requested_names = [g.strip() for g in args.generators.split(',')]
         
@@ -227,8 +230,9 @@ Examples:
         
         final_level = min(requested_names, key=get_compression_rate)  # lowest compression
         
-        # Build full chain from final level back to generator_512
-        all_levels = ['generator_512', 'generator_128', 'generator_32', 'generator_8']
+        # Build full chain from final level back to the highest compression generator
+        # Get all generators sorted by compression rate (highest first)
+        all_levels = sorted(GENERATOR_CONFIGS.keys(), key=get_compression_rate, reverse=True)
         final_compression = get_compression_rate(final_level)
         
         # Include all levels up to and including the final level

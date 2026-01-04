@@ -111,8 +111,8 @@ def train_step(dest_encoder, dest_codebook, generator, context_model,
 def main():
     parser = argparse.ArgumentParser(description='Train generator model for autoregressive code prediction')
     parser.add_argument('--generator', type=str, required=True,
-                       choices=['generator_512', 'generator_128', 'generator_32', 'generator_8'],
-                       help='Generator config name')
+                       choices=list(GENERATOR_CONFIGS.keys()),
+                       help=f'Generator config name (choices: {", ".join(GENERATOR_CONFIGS.keys())})')
     parser.add_argument('--data-dir', type=str, required=True,
                        help='Directory containing training audio files')
     parser.add_argument('--vqvae-weights-dir', type=str, default='weights',

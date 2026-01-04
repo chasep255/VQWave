@@ -7,104 +7,110 @@ SAMPLE_RATE = 22050
 
 # VQ-VAE configuration presets
 ENCODER_CONFIGS = {
-    "vqvae_512": {
-        "compression_rate": 512,
+    "vqvae_1024": {
+        "compression_rate": 1024,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 96, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 192, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 256, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 384, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 512, "kernel": 6, "stride": 2, "activation": "elu"},
+            # 4^5 = 1024
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 512, "kernel": 12, "stride": 4, "activation": "elu"},
+            # Frame-rate refinement
+            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
             {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
             {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
         ],
         "decoder_layers": [
+            # Mirror refinement first
             {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
             {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 384, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 256, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 192, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 96, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
+            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^5 = 1024
+            {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
-    "vqvae_128": {
-        "compression_rate": 128,
+    "vqvae_256": {
+        "compression_rate": 256,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 96, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 192, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 256, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 384, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 384, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^4 = 256
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu"},
+            # Frame-rate refinement
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
         ],
         "decoder_layers": [
-            {"channels": 384, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 384, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 192, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 96, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
+            # Mirror refinement first
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^4 = 256
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
-    "vqvae_32": {
-        "compression_rate": 32,
+    "vqvae_64": {
+        "compression_rate": 64,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 96, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 192, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 192, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^3 = 64
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
+            # Frame-rate refinement
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
         ],
         "decoder_layers": [
-            {"channels": 192, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 192, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 96, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
+            # Mirror refinement first
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^3 = 64
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
-    "vqvae_8": {
-        "compression_rate": 8,
+    "vqvae_16": {
+        "compression_rate": 16,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 96, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 96, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^2 = 16
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
+            # Frame-rate refinement
+            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
         ],
         "decoder_layers": [
-            {"channels": 96, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 96, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 48, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
+            # Mirror refinement first
+            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^2 = 16
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
 }
@@ -112,14 +118,14 @@ ENCODER_CONFIGS = {
 # Generator configuration presets
 # All parameters are derived from source_vqvae (context) and dest_vqvae (target) configs
 GENERATOR_CONFIGS = {
-    "generator_512": {
+    "generator_1024": {
         "source_vqvae": None,  # Unconditional generation
-        "dest_vqvae": "vqvae_512",  # Generates codes for 512x compression
+        "dest_vqvae": "vqvae_1024",  # Generates codes for 1024x compression
         "lstm_units": 512,
         "lstm_layers": 2,
     },
     "generator_128": {
-        "source_vqvae": "vqvae_512",  # Context from 512x codes
+        "source_vqvae": "vqvae_1024",  # Context from 1024x codes
         "dest_vqvae": "vqvae_128",  # Generates codes for 128x compression
         "lstm_units": 512,
         "lstm_layers": 2,
@@ -129,11 +135,11 @@ GENERATOR_CONFIGS = {
         "context_dilations": [1, 2, 4, 8, 16, 32],  # Dilation rates for each layer
         "context_kernel_size": 3,  # Kernel size for dilated conv layers
         "context_activation": "elu",  # Activation function
-        "context_upsample_factor": 4,  # Upsample factor (512x -> 128x = 4x)
+        "context_upsample_factor": 8,  # Upsample factor (1024x -> 128x = 8x)
     },
-    "generator_32": {
+    "generator_16": {
         "source_vqvae": "vqvae_128",  # Context from 128x codes
-        "dest_vqvae": "vqvae_32",  # Generates codes for 32x compression
+        "dest_vqvae": "vqvae_16",  # Generates codes for 16x compression
         "lstm_units": 256,
         "lstm_layers": 2,
         # Context model configuration
@@ -142,19 +148,6 @@ GENERATOR_CONFIGS = {
         "context_dilations": [1, 2, 4, 8, 16, 32],  # Dilation rates for each layer
         "context_kernel_size": 3,  # Kernel size for dilated conv layers
         "context_activation": "elu",  # Activation function
-        "context_upsample_factor": 4,  # Upsample factor (128x -> 32x = 4x)
-    },
-    "generator_8": {
-        "source_vqvae": "vqvae_32",  # Context from 32x codes
-        "dest_vqvae": "vqvae_8",  # Generates codes for 8x compression
-        "lstm_units": 256,
-        "lstm_layers": 2,
-        # Context model configuration
-        "context_dim": 256,  # Output dimension of context features
-        "context_channels": 256,  # Intermediate channels in context model dilated CNN
-        "context_dilations": [1, 2, 4, 8, 16, 32],  # Dilation rates for each layer
-        "context_kernel_size": 3,  # Kernel size for dilated conv layers
-        "context_activation": "elu",  # Activation function
-        "context_upsample_factor": 4,  # Upsample factor (32x -> 8x = 4x)
+        "context_upsample_factor": 8,  # Upsample factor (128x -> 16x = 8x)
     },
 }

@@ -117,8 +117,6 @@ class Decoder(Model):
                     activation=activation
                 )(x)
         
-        # Final output layers (tanh * sigmoid) - ensure float32 output
-        x = layers.Conv1D(1, 1, activation='tanh')(x)
         outputs = layers.Flatten(dtype='float32', name='decoder_output')(x)
         
         super().__init__(inputs=input_codes, outputs=outputs, name=name, **kwargs)

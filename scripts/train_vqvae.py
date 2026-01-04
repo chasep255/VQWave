@@ -31,59 +31,85 @@ for gpu in gpus:
 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
-
-# Loss function library
 @tf.function
 def stft_loss(y, r):
-    """Compute multi-scale STFT loss."""
-    loss = 0.0
-    for w, s in ((256, 64), (512, 128), (1024, 256), (2048, 512)):
-        y_ = tf.signal.stft(y, w, s)
-        r_ = tf.signal.stft(r, w, s)
-        loss += tf.reduce_mean(tf.abs(y_ - r_))
-
-    return loss
+    loss = []
+    for w, s in ((220, 41), (770, 109), (1100, 239)):
+        y_ = tf.abs(tf.signal.stft(y, w, s))
+        r_ = tf.abs(tf.signal.stft(r, w, s))
+        loss.append(tf.reduce_mean(tf.abs(y_ - r_)))
+    return tf.reduce_mean(loss)
 
 
 @tf.function
-def mel_loss(y, r, sample_rate=22050, n_fft=2048, hop_length=512, n_mels=80):
+def perceptual_mel_loss(y, r, sample_rate=22050, n_fft=1024, hop_length=256, n_mels=80):
     """
-    Compute mel spectrogram loss (not log mel).
+    Mel spectrogram loss in linear (non-log) space.
     
     Args:
         y: Generated audio [batch, samples]
         r: Reference audio [batch, samples]
         sample_rate: Audio sample rate (default: 22050)
-        n_fft: FFT window size (default: 2048)
-        hop_length: Hop length for STFT (default: 512)
+        n_fft: FFT window size (default: 1024, standard for 22kHz audio)
+        hop_length: Hop length for STFT (default: 256, typically n_fft/4)
         n_mels: Number of mel filter banks (default: 80)
     """
-    # Compute STFT magnitude spectrograms
     y_stft = tf.signal.stft(y, n_fft, hop_length, fft_length=n_fft)
     r_stft = tf.signal.stft(r, n_fft, hop_length, fft_length=n_fft)
-    
-    # Get magnitude spectrograms
+
     y_mag = tf.abs(y_stft)
     r_mag = tf.abs(r_stft)
-    
-    # Convert to mel scale
-    # Get mel weight matrix (shape: [n_fft//2 + 1, n_mels])
-    mel_weight_matrix = tf.signal.linear_to_mel_weight_matrix(
-        num_mel_bins=n_mels,
-        num_spectrogram_bins=n_fft // 2 + 1,
-        sample_rate=sample_rate,
-        lower_edge_hertz=0.0,
-        upper_edge_hertz=sample_rate / 2.0
+
+    mel_w = tf.signal.linear_to_mel_weight_matrix(
+        n_mels, n_fft // 2 + 1, sample_rate, 0.0, sample_rate / 2.0
     )
+
+    y_mel = tf.einsum('btf,fm->btm', y_mag, mel_w)
+    r_mel = tf.einsum('btf,fm->btm', r_mag, mel_w)
+
+    # L1 loss on raw mel spectrograms (linear space)
+    return tf.reduce_mean(tf.abs(y_mel - r_mel))
+
+
+@tf.function
+def hierarchical_l1_loss(y, r, scales=[256, 128, 64, 32, 16, 8, 4, 2, 1]):
+    """
+    Hierarchical L1 loss computed at multiple temporal scales.
     
-    # Apply mel filter bank: [batch, time, freq] @ [freq, n_mels] -> [batch, time, n_mels]
-    # Use einsum for clarity: 'btf,fm->btm' where b=batch, t=time, f=freq, m=mel
-    y_mel = tf.einsum('btf,fm->btm', y_mag, mel_weight_matrix)
-    r_mel = tf.einsum('btf,fm->btm', r_mag, mel_weight_matrix)
+    Computes L1 loss at different downsampling rates and averages them.
+    This encourages the model to match the reference at multiple temporal resolutions.
     
-    # Compute L1 loss on mel spectrograms (not log mel)
-    loss = tf.reduce_mean(tf.abs(y_mel - r_mel))
+    Args:
+        y: Generated audio [batch, samples]
+        r: Reference audio [batch, samples]
+        scales: List of downsampling factors (default: [256, 128, 64, 32, 16, 8, 4, 2, 1])
     
+    Returns:
+        Average L1 loss across all scales
+    """
+    loss = 0.0
+    
+    for scale in scales:
+        if scale == 1:
+            # Original resolution - no downsampling
+            loss += tf.reduce_mean(tf.abs(y - r))
+        else:
+            # Downsample by averaging over windows
+            # Add channel dimension: [batch, samples] -> [batch, samples, 1]
+            y_expanded = tf.expand_dims(y, axis=-1)  # [batch, samples, 1]
+            r_expanded = tf.expand_dims(r, axis=-1)  # [batch, samples, 1]
+            
+            # Average pool with pool_size=scale, stride=scale
+            y_down = tf.nn.avg_pool1d(y_expanded, ksize=scale, strides=scale, padding='VALID')
+            r_down = tf.nn.avg_pool1d(r_expanded, ksize=scale, strides=scale, padding='VALID')
+            
+            # Remove channel dimension: [batch, samples/scale, 1] -> [batch, samples/scale]
+            y_down = tf.squeeze(y_down, axis=-1)
+            r_down = tf.squeeze(r_down, axis=-1)
+            
+            # Compute L1 loss at this scale
+            loss += tf.reduce_mean(tf.abs(y_down - r_down))
+        
     return loss
 
 
@@ -102,13 +128,12 @@ def mse_loss(y, r):
 # Loss function registry
 LOSS_FUNCTIONS = {
     'stft': stft_loss,
-    'mel': mel_loss,
+    'mel': perceptual_mel_loss,
     'mse': mse_loss,
 }
 
 
-
-def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r, loss_fn):
+def train_step(encoder, decoder, codebook, optimizer, restarter, r):
     """Single training step."""
     with tf.GradientTape() as tape:
         # Encode audio to latents
@@ -123,22 +148,20 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r, loss_f
         # Decode to audio
         y = decoder(z_q_st, training=True)
         
-        # Compute audio reconstruction loss using selected loss function
-        if loss_fn == mel_loss:
-            audio_loss = loss_fn(y, r, sample_rate=SAMPLE_RATE)
-        else:
-            audio_loss = loss_fn(y, r)
+        # STFT audio loss (multi-scale)
+        stft_loss_val = stft_loss(y, r)
+        audio_loss = stft_loss_val
 
         # VQ-VAE commitment loss: updates both encoder and codebook
         commit_loss = tf.reduce_mean(tf.square(z_e - z_q))
 
-        loss = audio_loss + commit_loss
+        loss = audio_loss + 0.01 * commit_loss
     
     weights = (decoder.trainable_weights + 
                codebook.trainable_weights + 
                encoder.trainable_weights)
+    
     grads = tape.gradient(loss, weights)
-    # LossScaleOptimizer handles scaling automatically in newer TensorFlow
     optimizer.apply_gradients(zip(grads, weights))
     
     num_used, num_reset = restarter.update(z_e, codes)
@@ -147,6 +170,7 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r, loss_f
     return {
         'loss': loss,
         'audio_loss': audio_loss,
+        'stft_loss': stft_loss_val,
         'commit_loss': commit_loss,
         'used': num_used,
         'reset': num_reset,
@@ -156,8 +180,8 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, fp16, r, loss_f
 def main():
     parser = argparse.ArgumentParser(description='Train VQ-VAE encoder/decoder model')
     parser.add_argument('--model', type=str, required=True,
-                       choices=['vqvae_512', 'vqvae_128', 'vqvae_32', 'vqvae_8'],
-                       help='Model preset name')
+                       choices=list(ENCODER_CONFIGS.keys()),
+                       help=f'Model preset name (choices: {", ".join(ENCODER_CONFIGS.keys())})')
     parser.add_argument('--data-dir', type=str, required=True,
                        help='Directory containing training audio files')
     parser.add_argument('--output-dir', type=str, default='weights',
@@ -166,31 +190,24 @@ def main():
                        help='Batch size (default: 8)')
     parser.add_argument('--start-epoch', type=int, default=0,
                        help='Starting epoch number (default: 0)')
+    parser.add_argument('--load-weights', action='store_true', default=False,
+                       help='Load existing weights from output directory (default: False)')
     parser.add_argument('--warmup-steps', type=int, default=0,
                        help='Number of warmup steps for learning rate (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=2**16,
                        help='Input audio length in samples (default: 65536)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
-    parser.add_argument('--code-reset-limit', type=int, default=32,
-                       help='Codebook reset limit (default: 32)')
-    parser.add_argument('--learning-rate', '--lr', type=float, default=2e-4,
+    parser.add_argument('--code-reset-limit', type=int, default=256,
+                       help='Codebook reset limit (default: 256)')
+    parser.add_argument('--learning-rate', '--lr', type=float, default=2.5e-4,
                        help='Initial learning rate (default: 2e-4)')
     parser.add_argument('--decay-rate', '--half-life', type=float, default=0.5,
                        help='Learning rate decay rate (default: 0.5, halves every decay_steps)')
     parser.add_argument('--decay-steps', type=int, default=None,
                        help='Number of steps for each decay (default: steps * 10)')
-    parser.add_argument('--fp16', action='store_true', default=False,
-                       help='Use mixed precision training (default: False)')
-    parser.add_argument('--loss', type=str, default='mse',
-                       choices=['stft', 'mel', 'mse'],
-                       help='Loss function to use: stft (multi-scale STFT), mel (mel spectrogram), or mse (mean squared error) (default: mse)')
     
     args = parser.parse_args()
-    
-    # Set mixed precision policy
-    if args.fp16:
-        tf.keras.mixed_precision.set_global_policy('mixed_float16')
     
     # Create encoder, decoder, and codebook
     if args.model not in ENCODER_CONFIGS:
@@ -209,18 +226,33 @@ def main():
     print("\nCodebook:")
     codebook.summary()
     
-    # Load weights if resuming training
-    if args.start_epoch > 0:
+    print("\nUsing STFT audio loss (multi-scale)")
+    
+    # Load weights if resuming training or --load-weights flag is set
+    if args.start_epoch > 0 or args.load_weights:
         model_prefix = args.model
-        encoder.load_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
-        )
-        decoder.load_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
-        )
-        codebook.load_weights(
-            os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
-        )
+        encoder_path = os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
+        decoder_path = os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
+        codebook_path = os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
+        
+        if os.path.exists(encoder_path) and os.path.exists(decoder_path) and os.path.exists(codebook_path):
+            print(f"\nLoading weights from {args.output_dir}...")
+            encoder.load_weights(encoder_path)
+            decoder.load_weights(decoder_path)
+            codebook.load_weights(codebook_path)
+            print("Weights loaded successfully.")
+        else:
+            missing = []
+            if not os.path.exists(encoder_path):
+                missing.append('encoder')
+            if not os.path.exists(decoder_path):
+                missing.append('decoder')
+            if not os.path.exists(codebook_path):
+                missing.append('codebook')
+            raise FileNotFoundError(
+                f"Weight files not found in {args.output_dir}. Missing: {', '.join(missing)}. "
+                f"Expected: {encoder_path}, {decoder_path}, {codebook_path}"
+            )
     
     # Load dataset
     data = AudioDataset(args.data_dir)
@@ -245,8 +277,6 @@ def main():
     
     opt = tf.keras.optimizers.Adam(lr)
     opt.iterations.assign(start_step)
-    if args.fp16:
-        opt = tf.keras.mixed_precision.LossScaleOptimizer(opt, dynamic_growth_steps=512)
     
     # Setup codebook restarter
     restarter = CodebookRestarter(
@@ -254,14 +284,6 @@ def main():
         32,
         random_init=(args.start_epoch == 0)
     )
-    
-    # Get loss function
-    if args.loss not in LOSS_FUNCTIONS:
-        available = ", ".join(LOSS_FUNCTIONS.keys())
-        raise ValueError(f"Unknown loss function '{args.loss}'. Available: {available}")
-    
-    loss_fn = LOSS_FUNCTIONS[args.loss]
-    print(f"Using loss function: {args.loss}")
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -273,33 +295,32 @@ def main():
         start_time = time.time()
         loss_acc = AverageAccumulator()
         audio_loss_acc = AverageAccumulator()
+        stft_loss_acc = AverageAccumulator()
         commit_loss_acc = AverageAccumulator()
         nreset = 0
         
         for step in range(args.epoch_steps):
             batch = data.random_batch(args.batch_size, args.input_length)[0]
-            result = train_step(encoder, decoder, codebook, opt, restarter, args.fp16, batch, loss_fn)
+            result = train_step(encoder, decoder, codebook, opt, restarter, batch)
             
             loss_acc.add(result['loss'])
             audio_loss_acc.add(result['audio_loss'])
+            stft_loss_acc.add(result['stft_loss'])
             commit_loss_acc.add(result['commit_loss'])
             nreset += np.sum(result['reset'])
             
             etime = int(args.epoch_steps * ((time.time() - start_time) / (step + 1)))
             etime = '%02d:%02d:%02d' % (etime // 3600, (etime // 60) % 60, etime % 60)
-            # Get learning rate - handle both schedule and wrapped optimizer
-            if hasattr(opt, 'inner_optimizer'):
-                # LossScaleOptimizer wraps the optimizer
-                lr_value = opt.inner_optimizer.learning_rate
-            else:
-                lr_value = opt.learning_rate
+            # Get learning rate
+            lr_value = opt.learning_rate
             if callable(lr_value):
                 current_lr = float(lr_value(opt.iterations))
             else:
                 current_lr = float(lr_value)
-            print('Epoch=%04d Step=%04d Time=%s LR=%+.4e Loss=%+.4e Audio-Loss=%+.4e Commit-Loss=%+.4e Used=%05d Reset=%07d  ' % 
-                  (epoch, step, etime, current_lr, loss_acc.get(), audio_loss_acc.get(), 
-                   commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
+            
+            print('Epoch=%04d Step=%04d Time=%s LR=%+.4e Loss=%+.4e STFT=%+.4e Commit=%+.4e Used=%05d Reset=%07d  ' % 
+                  (epoch, step, etime, current_lr, loss_acc.get(), 
+                   stft_loss_acc.get(), commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
         print()
         
         # Get average loss for this epoch
