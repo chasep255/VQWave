@@ -88,7 +88,7 @@ class Generator(Model):
     Supports both training (non-stateful) and inference (stateful) modes.
     """
     
-    def __init__(self, num_codes, embedding_dim=64, lstm_units=1024, lstm_layers=2, 
+    def __init__(self, num_codes, embedding_dim=32, lstm_units=1024, lstm_layers=2, 
                  context_dim=None, stateful=False, batch_size=None, name='generator', **kwargs):
         """
         Initialize Generator with configuration.
@@ -129,22 +129,15 @@ class Generator(Model):
         # Embed integer codes
         x = layers.Embedding(num_codes, embedding_dim, name='code_embedding')(input_codes)
         
-        # Add context if provided (concatenate or add - using add for simplicity)
+        # Concatenate context to input embedding if provided
         if context_dim is not None:
-            # Project context to match embedding dimension
-            # Context comes from ELU layer, so we project it before adding to embeddings
-            context_proj = layers.Conv1D(
-                embedding_dim, 1,
-                use_bias=False,
-                name='context_projection'
-            )(input_context)
-            # Add context to embeddings
-            # Note: ContextModel upsamples 4x, so context sequence length should match codes length
-            x = x + context_proj
+            # Concatenate along channel dimension: [batch, time, embedding_dim + context_dim]
+            x = layers.Concatenate(axis=-1, name='concat_context_input')([x, input_context])
         
-        # Stacked LSTM layers (stateful for inference mode)
+        # Stacked LSTM layers with context concatenation (stateful for inference mode)
         lstm_layers_list = []
         for i in range(lstm_layers):
+            # LSTM layer
             lstm_layer = layers.LSTM(
                 lstm_units,
                 return_sequences=True,
@@ -153,13 +146,18 @@ class Generator(Model):
             )
             lstm_layers_list.append(lstm_layer)
             x = lstm_layer(x)
-        
-        # Hidden layer before output (Conv1D with kernel=1 acts like Dense)
-        x = layers.Conv1D(
-            lstm_units, 1,
-            activation='elu',
-            name='output_hidden'
-        )(x)
+            
+            # Concatenate context if provided (after LSTM, before Conv1D)
+            if context_dim is not None:
+                # Concatenate along channel dimension: [batch, time, lstm_units + context_dim]
+                x = layers.Concatenate(axis=-1, name=f'concat_context_{i+1}')([x, input_context])
+            
+            # Process features with Conv1D (always applied, whether context is present or not)
+            x = layers.Conv1D(
+                lstm_units, 1,
+                activation='elu',
+                name=f'context_fusion_{i+1}'
+            )(x)
         
         # Output logits over codebook (one logit per code)
         outputs = layers.Conv1D(
