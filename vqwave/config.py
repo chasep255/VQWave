@@ -39,7 +39,7 @@ ENCODER_CONFIGS = {
         ],
     },
     "vqvae_64": {
-        "compression_rate": 128,
+        "compression_rate": 64,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
@@ -62,31 +62,31 @@ ENCODER_CONFIGS = {
             {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
 
             # 4^3 = 64
-            {"channels": 64, "kernel": 12, "stride": 2, "activation": "elu", "transpose": True},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
             {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
             {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
-    "vqvae_16": {
-        "compression_rate": 16,
-        "num_codes": 1024,
-        "code_dim": 32,
+    "vqvae_4": {
+        "compression_rate": 4,
+        "num_codes": 256,
+        "code_dim": 16,
         "encoder_layers": [
-            # 4^2 = 16
+            # 4^1 = 4
             {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
-            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
             # Frame-rate refinement
-            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
         ],
         "decoder_layers": [
             # Mirror refinement first
-            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
-            # 4^2 = 16
-            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^1 = 4
             {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
