@@ -38,33 +38,31 @@ ENCODER_CONFIGS = {
             {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
-    "vqvae_128": {
+    "vqvae_64": {
         "compression_rate": 128,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
-            # 4^3 * 2 = 256
+            # 4^3 = 64
             {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
-            {"channels": 256, "kernel": 6, "stride": 2, "activation": "elu"},
             # Frame-rate refinement
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
 
         ],
         "decoder_layers": [
             # Mirror refinement first
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 128, "kernel": 9, "stride": 1, "activation": "elu"},
 
-            # 4^3 * 2 = 128
-            {"channels": 128, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            # 4^3 = 64
+            {"channels": 64, "kernel": 12, "stride": 2, "activation": "elu", "transpose": True},
             {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
             {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
@@ -103,18 +101,18 @@ GENERATOR_CONFIGS = {
         "lstm_units": 512,
         "lstm_layers": 2,
     },
-    "generator_128": {
+    "generator_64": {
         "source_vqvae": "vqvae_1024",  # Context from 1024x codes
-        "dest_vqvae": "vqvae_128",  # Generates codes for 128x compression
+        "dest_vqvae": "vqvae_64",  # Generates codes for 64x compression
         "lstm_units": 256,
         "lstm_layers": 2,
         # Context model configuration
         "context_dim": 256,  # Output dimension of context features
         "context_channels": 512,  # Intermediate channels in context model dilated CNN
-        "context_dilations": [1, 2, 4, 8, 16, 32],  # Dilation rates for each layer
+        "context_dilations": [1, 2, 4, 8, 16],  # Dilation rates for each layer
         "context_kernel_size": 3,  # Kernel size for dilated conv layers
         "context_activation": "elu",  # Activation function
-        "context_upsample_factor": 8,  # Upsample factor (1024x -> 128x = 8x)
+        "context_upsample_factor": 16,  # Upsample factor (1024x -> 128x = 8x)
     },
     "generator_16": {
         "source_vqvae": "vqvae_128",  # Context from 128x codes
