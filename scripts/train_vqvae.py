@@ -80,9 +80,9 @@ def train_step(encoder, decoder, codebook, optimizer, restarter, r, loss_fn):
         audio_loss = loss_fn(y, r)
 
         # VQ-VAE commitment loss: updates both encoder and codebook
-        commit_loss = tf.reduce_mean(tf.square(z_e - z_q))
+        commit_loss = 0.01 * tf.reduce_mean(tf.square(z_e - z_q))
 
-        loss = audio_loss + 0.01 * commit_loss
+        loss = audio_loss + commit_loss
     
     weights = (decoder.trainable_weights + 
                codebook.trainable_weights + 
@@ -255,9 +255,9 @@ def main():
             else:
                 current_lr = float(lr_value)
             
-            print('Epoch=%04d Step=%04d Time=%s LR=%+.4e Loss=%+.4e STFT=%+.4e Commit=%+.4e Used=%05d Reset=%07d  ' % 
+            print('Epoch=%04d Step=%04d Time=%s LR=%+.4e Loss=%+.4e (Audio=%+.4e Commit=%+.4e) Used=%05d Reset=%07d  ' % 
                   (epoch, step, etime, current_lr, loss_acc.get(), 
-                   stft_loss_acc.get(), commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
+                   audio_loss_acc.get(), commit_loss_acc.get(), np.sum(result['used']), nreset), end='\r')
         print()
         
         # Get average audio loss (selected loss function) for this epoch
