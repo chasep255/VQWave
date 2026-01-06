@@ -123,6 +123,8 @@ def main():
                        help='Batch size (default: 8)')
     parser.add_argument('--start-epoch', type=int, default=0,
                        help='Starting epoch number (default: 0)')
+    parser.add_argument('--load-weights', action='store_true', default=False,
+                       help='Load existing weights from output directory (default: False)')
     parser.add_argument('--warmup-steps', type=int, default=0,
                        help='Number of warmup steps for learning rate (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=2**16,
@@ -209,16 +211,36 @@ def main():
         print("\nContext Model:")
         context_model.summary()
     
-    # Load generator/context weights if resuming
-    if args.start_epoch > 0:
-        generator.load_weights(
-            os.path.join(args.output_dir, f'{args.generator}_generator.weights.h5')
-        )
+    # Load weights if resuming training or --load-weights flag is set
+    if args.start_epoch > 0 or args.load_weights:
+        generator_path = os.path.join(args.output_dir, f'{args.generator}_generator.weights.h5')
+        context_path = None
         if context_model is not None:
-            context_model.load_weights(
-                os.path.join(args.output_dir, f'{args.generator}_context.weights.h5')
+            context_path = os.path.join(args.output_dir, f'{args.generator}_context.weights.h5')
+        
+        # Check which files exist
+        generator_exists = os.path.exists(generator_path)
+        context_exists = (context_path is None) or os.path.exists(context_path)
+        
+        if generator_exists and context_exists:
+            print(f"\nLoading weights from {args.output_dir}...")
+            generator.load_weights(generator_path)
+            if context_model is not None:
+                context_model.load_weights(context_path)
+            print("Weights loaded successfully.")
+            if args.start_epoch > 0:
+                print(f"Resuming training from epoch {args.start_epoch}")
+        else:
+            missing = []
+            if not generator_exists:
+                missing.append('generator')
+            if context_model is not None and not context_exists:
+                missing.append('context')
+            raise FileNotFoundError(
+                f"Weight files not found in {args.output_dir}. Missing: {', '.join(missing)}. "
+                f"Expected: {generator_path}" + 
+                (f", {context_path}" if context_path else "")
             )
-        print(f"Resuming training from epoch {args.start_epoch}")
     
     # Load dataset
     data = AudioDataset(args.data_dir)
