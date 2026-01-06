@@ -112,6 +112,38 @@ source venv/bin/activate
 
 Convert your audio files to the `.u16` format used for training.
 
+### Building a Dataset with spotdl
+
+You can download audio from Spotify playlists, albums, or artists using [spotdl](https://github.com/spotDL/spotify-downloader):
+
+```bash
+# Install spotdl
+pip install spotdl
+
+# Download a playlist
+spotdl download https://open.spotify.com/playlist/37i9dQZF1DX3Kdv0IChEm9 \
+  --format m4a \
+  --output "{artists} - {title}.{output-ext}" \
+  --overwrite skip \
+  --threads 8
+```
+
+**Query formats:**
+- Playlist URL: `https://open.spotify.com/playlist/...`
+- Album URL: `https://open.spotify.com/album/...`
+- Artist URL: `https://open.spotify.com/artist/...`
+- Single track URL: `https://open.spotify.com/track/...`
+- Search queries: `album:album name`, `playlist:playlist name`, `artist:artist name`
+- Liked songs: use `saved` as the query
+
+**Options:**
+- `--format m4a`: Download as M4A format (options: `mp3`, `flac`, `ogg`, `opus`, `m4a`, `wav`)
+- `--output "{artists} - {title}.{output-ext}"`: Customize filename format using template variables
+- `--overwrite skip`: Skip files that already exist (options: `force`, `metadata`, `skip`)
+- `--threads 8`: Use 8 parallel download threads
+
+After downloading, use the conversion script below to prepare the audio for training.
+
 ### Supported Formats
 
 - `.m4a`, `.mp3`, `.wav`, `.flac`, `.ogg`
