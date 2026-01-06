@@ -22,7 +22,7 @@ from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
 def sample_temperature(logits, temperature):
     """Sample using temperature scaling."""
     # logits is 1D [num_codes], need to expand for categorical
-    logits_2d = tf.expand_dims(logits / temperature, 0)  # [1, num_codes]
+    logits_2d = tf.expand_dims(logits / tf.cast(temperature, logits.dtype), 0)  # [1, num_codes]
     return tf.random.categorical(logits_2d, 1, dtype=tf.int32)[0, 0]
 
 
@@ -31,9 +31,8 @@ def sample_top_k(logits, k, temperature=1.0):
     """Sample from top-k logits, optionally with temperature scaling."""
     # logits is 1D [num_codes]
     top_k_logits, top_k_indices = tf.nn.top_k(logits, k)
-    # Apply temperature if not 1.0
-    if temperature != 1.0:
-        top_k_logits = top_k_logits / temperature
+    # Apply temperature (always divide to avoid Python-side branching in @tf.function)
+    top_k_logits = top_k_logits / tf.cast(temperature, top_k_logits.dtype)
     logits_2d = tf.expand_dims(top_k_logits, 0)  # [1, k]
     sampled_idx = tf.random.categorical(logits_2d, 1, dtype=tf.int32)[0, 0]
     return top_k_indices[sampled_idx]
@@ -43,9 +42,8 @@ def sample_top_k(logits, k, temperature=1.0):
 def sample_top_p(logits, p, temperature=1.0):
     """Sample using top-p (nucleus) sampling, optionally with temperature scaling."""
     # logits is 1D [num_codes]
-    # Apply temperature if not 1.0
-    if temperature != 1.0:
-        logits = logits / temperature
+    # Apply temperature (always divide to avoid Python-side branching in @tf.function)
+    logits = logits / tf.cast(temperature, logits.dtype)
     
     # Convert to probabilities
     probs = tf.nn.softmax(logits)
@@ -58,10 +56,12 @@ def sample_top_p(logits, p, temperature=1.0):
     cum_probs = tf.cumsum(sorted_probs)
     
     # Find the smallest set where cumulative probability >= p
-    # We need at least one token, so we use >= p - epsilon to handle floating point
+    # Include tokens until cumulative probability exceeds p (but always include at least one)
+    # mask[i] = True if cum_probs[i] <= p (i.e., include this token)
     mask = cum_probs <= p
-    # Ensure at least one token is selected
-    num_to_keep = tf.maximum(tf.reduce_sum(tf.cast(mask, tf.int32)), 1)
+    num_to_keep = tf.reduce_sum(tf.cast(mask, tf.int32))
+    # Ensure at least one token is selected (even if first token alone exceeds p)
+    num_to_keep = tf.maximum(num_to_keep, 1)
     
     # Get top-p logits and indices
     top_p_indices = sorted_indices[:num_to_keep]
@@ -207,6 +207,9 @@ Examples:
 
   # Generate with top-k sampling
   %(prog)s --generators generator_1024 --length 1024 --top-k 50
+
+  # Generate with top-p (nucleus) sampling
+  %(prog)s --generators generator_1024 --length 1024 --top-p 0.9
 
   # Generate using all levels hierarchically
   %(prog)s --generators all --length 1024
