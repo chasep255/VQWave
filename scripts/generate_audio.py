@@ -40,6 +40,40 @@ def sample_top_k(logits, k, temperature=1.0):
 
 
 @tf.function
+def sample_top_p(logits, p, temperature=1.0):
+    """Sample using top-p (nucleus) sampling, optionally with temperature scaling."""
+    # logits is 1D [num_codes]
+    # Apply temperature if not 1.0
+    if temperature != 1.0:
+        logits = logits / temperature
+    
+    # Convert to probabilities
+    probs = tf.nn.softmax(logits)
+    
+    # Sort probabilities in descending order
+    sorted_probs = tf.sort(probs, direction='DESCENDING')
+    sorted_indices = tf.argsort(probs, direction='DESCENDING')
+    
+    # Compute cumulative probabilities
+    cum_probs = tf.cumsum(sorted_probs)
+    
+    # Find the smallest set where cumulative probability >= p
+    # We need at least one token, so we use >= p - epsilon to handle floating point
+    mask = cum_probs <= p
+    # Ensure at least one token is selected
+    num_to_keep = tf.maximum(tf.reduce_sum(tf.cast(mask, tf.int32)), 1)
+    
+    # Get top-p logits and indices
+    top_p_indices = sorted_indices[:num_to_keep]
+    top_p_logits = tf.gather(logits, top_p_indices)
+    
+    # Sample from top-p set
+    logits_2d = tf.expand_dims(top_p_logits, 0)  # [1, num_to_keep]
+    sampled_idx = tf.random.categorical(logits_2d, 1, dtype=tf.int32)[0, 0]
+    return top_p_indices[sampled_idx]
+
+
+@tf.function
 def sample_greedy(logits):
     """Greedy sampling (argmax)."""
     # logits is 1D [num_codes], argmax returns scalar
@@ -70,7 +104,7 @@ def code_to_ascii(code: int) -> str:
 
 
 def generate_codes(generator, context_model, num_codes, source_codes, 
-                   temperature=None, top_k=None, seed=None, show_codes=False):
+                   temperature=None, top_k=None, top_p=None, seed=None, show_codes=False):
     """
     Generate codes autoregressively using a generator.
     
@@ -81,6 +115,7 @@ def generate_codes(generator, context_model, num_codes, source_codes,
         source_codes: Lower-res codes for context (None if unconditional)
         temperature: Temperature for sampling (None for greedy)
         top_k: Top-k sampling (overrides temperature if set)
+        top_p: Top-p (nucleus) sampling (overrides top_k and temperature if set)
         seed: Initial code seed (random if None)
         show_codes: If True, print codes as they're generated
     
@@ -131,8 +166,11 @@ def generate_codes(generator, context_model, num_codes, source_codes,
         # logits shape: [1, 1, num_codes]
         logits = logits[0, 0]  # [num_codes]
         
-        # Sample next code
-        if top_k is not None:
+        # Sample next code (priority: top_p > top_k > temperature > greedy)
+        if top_p is not None:
+            # Top-p (nucleus) sampling with optional temperature
+            next_code = sample_top_p(logits, top_p, temperature=temperature)
+        elif top_k is not None:
             # Top-k with optional temperature
             next_code = sample_top_k(logits, top_k, temperature=temperature)
         elif temperature is not None:
@@ -186,6 +224,8 @@ Examples:
                        help='Temperature for sampling (default: 0.9)')
     parser.add_argument('--top-k', type=int, default=None,
                        help='Top-k sampling (overrides temperature if set)')
+    parser.add_argument('--top-p', type=float, default=None,
+                       help='Top-p (nucleus) sampling (overrides top-k and temperature if set, typical values: 0.9-0.95)')
     parser.add_argument('--seed', type=int, default=None,
                        help='Random seed for first code (random if not specified)')
     parser.add_argument('--vqvae-weights-dir', type=str, default='weights',
@@ -365,6 +405,7 @@ Examples:
             source_codes_for_context,
             temperature=args.temperature,
             top_k=args.top_k,
+            top_p=args.top_p,
             seed=args.seed if gen_name == generator_names[0] else None,
             show_codes=True
         )

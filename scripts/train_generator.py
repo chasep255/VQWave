@@ -131,10 +131,10 @@ def main():
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
                        help='Initial learning rate (default: 1e-3)')
-    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.5,
-                       help='Learning rate decay rate (default: 0.5, halves every decay_steps)')
+    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.8,
+                       help='Learning rate decay rate (default: 0.8)')
     parser.add_argument('--decay-steps', type=int, default=None,
-                       help='Number of steps for each decay (default: steps * 10)')
+                       help='Number of steps for each decay (default: epoch_steps)')
     parser.add_argument('--fp16', action='store_true', default=False,
                        help='Use mixed precision training (default: False)')
     
@@ -226,7 +226,7 @@ def main():
     print(f'\n%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
     
     # Setup optimizer with learning rate schedule
-    decay_steps = args.decay_steps if args.decay_steps is not None else args.epoch_steps * 10
+    decay_steps = args.decay_steps if args.decay_steps is not None else args.epoch_steps
     base_lr = tf.keras.optimizers.schedules.ExponentialDecay(
         args.learning_rate, decay_steps, args.decay_rate
     )

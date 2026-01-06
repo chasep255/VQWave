@@ -104,7 +104,7 @@ GENERATOR_CONFIGS = {
         "source_vqvae": None,  # Unconditional generation
         "dest_vqvae": "vqvae_1024",  # Generates codes for 1024x compression
         "lstm_units": 512,
-        "lstm_layers": 2,
+        "lstm_layers": 3,
     },
     "generator_64": {
         "source_vqvae": "vqvae_1024",  # Context from 1024x codes

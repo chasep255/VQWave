@@ -146,18 +146,12 @@ class Generator(Model):
             )
             lstm_layers_list.append(lstm_layer)
             x = lstm_layer(x)
-            
-            # Concatenate context if provided (after LSTM, before Conv1D)
-            if context_dim is not None:
-                # Concatenate along channel dimension: [batch, time, lstm_units + context_dim]
-                x = layers.Concatenate(axis=-1, name=f'concat_context_{i+1}')([x, input_context])
-            
-            # Process features with Conv1D (always applied, whether context is present or not)
-            x = layers.Conv1D(
-                lstm_units, 1,
-                activation='elu',
-                name=f'context_fusion_{i+1}'
-            )(x)
+
+        x = layers.Conv1D(
+            lstm_units, 1,
+            activation='swish',
+            name='output_conv'
+        )(x)
         
         # Output logits over codebook (one logit per code)
         outputs = layers.Conv1D(
