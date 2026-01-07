@@ -13,7 +13,7 @@ import sys
 import numpy as np
 import tensorflow as tf
 
-from vqwave.encoder import Encoder, Decoder, CodebookManager
+from vqwave.encoder import Decoder, CodebookManager
 from vqwave.generator import create_generator
 from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
 
@@ -257,38 +257,60 @@ def generate_codes(generator, context_model, num_codes, source_codes,
     return codes
 
 
+def play_audio(audio, sample_rate):
+    """Play audio with Ctrl+C support."""
+    import pyaudio
+    
+    CHUNK_SIZE = 4096  # Write in chunks for interruptibility
+    p = pyaudio.PyAudio()
+    stream = p.open(
+        format=pyaudio.paFloat32,
+        channels=1,
+        rate=sample_rate,
+        output=True
+    )
+    
+    try:
+        audio_bytes = audio.astype(np.float32).tobytes()
+        for i in range(0, len(audio_bytes), CHUNK_SIZE * 4):  # 4 bytes per float32
+            stream.write(audio_bytes[i:i + CHUNK_SIZE * 4])
+    except KeyboardInterrupt:
+        print("\nPlayback interrupted.")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate audio from trained generator models',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate codes using a generator
-  %(prog)s --generators generator_1024 --length 1024
+  # Generate codes using a generator (loads full hierarchy automatically)
+  %(prog)s --generator generator_64 --length 1024
 
-  # Generate with temperature sampling
-  %(prog)s --generators generator_1024 --length 1024 --temperature 0.9
+  # Generate with temperature sampling (applies to all levels)
+  %(prog)s --generator generator_64 --length 1024 --temperature 0.9
+
+  # Generate with different temperatures per level
+  %(prog)s --generator generator_64 --length 1024 --temperature 0.8,0.9
 
   # Generate with top-k sampling
-  %(prog)s --generators generator_1024 --length 1024 --top-k 50
+  %(prog)s --generator generator_64 --length 1024 --top-k 50
 
   # Generate with top-p (nucleus) sampling
-  %(prog)s --generators generator_1024 --length 1024 --top-p 0.9
-
-  # Generate using all levels hierarchically
-  %(prog)s --generators all --length 1024
-
-  # Generate using multiple levels
-  %(prog)s --generators generator_1024,generator_128 --length 1024
+  %(prog)s --generator generator_64 --length 1024 --top-p 0.9
         """
     )
     
-    parser.add_argument('--generators', type=str, required=True,
-                       help=f'Comma-separated generator names or "all" (available: {", ".join(GENERATOR_CONFIGS.keys())})')
+    parser.add_argument('--generator', type=str, required=True,
+                       help=f'Generator name (available: {", ".join(GENERATOR_CONFIGS.keys())}). All prior generators in the hierarchy are automatically loaded.')
     parser.add_argument('--length', type=int, required=True,
                        help='Number of codes to generate at the first/outer layer (highest compression, e.g., 512x). Subsequent levels calculated automatically.')
-    parser.add_argument('--temperature', type=float, default=0.9,
-                       help='Temperature for sampling (default: 0.9)')
+    parser.add_argument('--temperature', type=str, default='0.9',
+                       help='Temperature for sampling: single value (applies to all levels) or comma-separated values for each level (default: 0.9)')
     parser.add_argument('--top-k', type=int, default=None,
                        help='Top-k sampling (overrides temperature if set)')
     parser.add_argument('--top-p', type=float, default=None,
@@ -316,45 +338,37 @@ Examples:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     
-    # Parse generator list
-    if args.generators.lower() == 'all':
-        # Use all generators, sorted by compression rate (highest first)
-        def get_compression_rate(name):
-            return int(GENERATOR_CONFIGS[name]['dest_vqvae'].replace('vqvae_', ''))
-        generator_names = sorted(GENERATOR_CONFIGS.keys(), key=get_compression_rate, reverse=True)
+    # Parse temperature (single value applies to all levels, comma-separated applies per level)
+    temperature_str = args.temperature
+    if ',' in temperature_str:
+        temperatures = [float(t.strip()) for t in temperature_str.split(',')]
     else:
-        requested_names = [g.strip() for g in args.generators.split(',')]
-        
-        # Validate requested generator names
-        for name in requested_names:
-            if name not in GENERATOR_CONFIGS:
-                print(f"Error: Unknown generator '{name}'. Available: {', '.join(GENERATOR_CONFIGS.keys())}")
-                sys.exit(1)
-        
-        # Determine which level to use (pick the most detailed / lowest compression)
-        def get_compression_rate(name):
-            return int(GENERATOR_CONFIGS[name]['dest_vqvae'].replace('vqvae_', ''))
-        
-        final_level = min(requested_names, key=get_compression_rate)  # lowest compression
-        
-        # Build full chain from final level back to the highest compression generator
-        # Get all generators sorted by compression rate (highest first)
-        all_levels = sorted(GENERATOR_CONFIGS.keys(), key=get_compression_rate, reverse=True)
-        final_compression = get_compression_rate(final_level)
-        
-        # Include all levels up to and including the final level
-        generator_names = [level for level in all_levels if get_compression_rate(level) >= final_compression]
-        
-        if len(requested_names) > 1:
-            print(f"Warning: Multiple generators specified. Using full chain ending at {final_level}")
+        # Single value - will be used for all levels
+        single_temp = float(temperature_str)
+        temperatures = [single_temp]
     
-    # Sort generators by compression rate (highest first for hierarchical generation)
+    # Parse generator - single generator name, loads full hierarchy
+    requested_name = args.generator.strip()
+    
+    # Validate requested generator
+    if requested_name not in GENERATOR_CONFIGS:
+        print(f"Error: Unknown generator '{requested_name}'. Available: {', '.join(GENERATOR_CONFIGS.keys())}")
+        sys.exit(1)
+    
+    # Build full hierarchy from requested generator back to highest compression
     def get_compression_rate(name):
         return int(GENERATOR_CONFIGS[name]['dest_vqvae'].replace('vqvae_', ''))
     
-    generator_names.sort(key=get_compression_rate, reverse=True)
+    # Get all generators sorted by compression rate (highest first)
+    all_levels = sorted(GENERATOR_CONFIGS.keys(), key=get_compression_rate, reverse=True)
+    requested_compression = get_compression_rate(requested_name)
     
-    print(f"Generating with generators: {', '.join(generator_names)}")
+    # Include all levels up to and including the requested level
+    generator_names = [level for level in all_levels if get_compression_rate(level) >= requested_compression]
+    
+    # Already sorted by compression rate (highest first)
+    
+    print(f"Generating with generator hierarchy: {', '.join(generator_names)}")
     
     # Load VQ-VAE models and generators
     vqvae_models = {}
@@ -380,23 +394,7 @@ Examples:
             )
             
             vqvae_models[dest_vqvae_key] = {'decoder': decoder, 'codebook': codebook}
-            print(f"Loaded VQ-VAE: {dest_vqvae_key}")
-        
-        # Load source VQ-VAE if needed (for context)
-        if source_vqvae_key is not None and source_vqvae_key not in vqvae_models:
-            source_config = ENCODER_CONFIGS[source_vqvae_key]
-            encoder = Encoder(source_config)
-            codebook = CodebookManager(source_config)
-            
-            encoder.load_weights(
-                os.path.join(args.vqvae_weights_dir, f'{source_vqvae_key}_encoder.weights.h5')
-            )
-            codebook.load_weights(
-                os.path.join(args.vqvae_weights_dir, f'{source_vqvae_key}_codebook.weights.h5')
-            )
-            
-            vqvae_models[source_vqvae_key] = {'encoder': encoder, 'codebook': codebook}
-            print(f"Loaded source VQ-VAE: {source_vqvae_key}")
+            print(f"Loaded VQ-VAE decoder: {dest_vqvae_key}")
         
         # Create and load generator
         generator, context_model = create_generator(gen_name, stateful=True, batch_size=1)
@@ -455,22 +453,20 @@ Examples:
         generator = generators[gen_name]
         context_model = context_models[gen_name]
         
-        # Prepare source codes for context if needed
-        source_codes_for_context = None
-        if source_vqvae_key is not None and current_codes is not None:
-            # We have codes from previous level, but we need to encode them to lower-res
-            # Actually, current_codes are already at the right level, we just need to use them
-            # For context, we need the lower-res codes that correspond to these positions
-            # This is a bit tricky - we'd need to decode current_codes to audio, then encode at lower res
-            # For now, let's assume we generate hierarchically: higher compression first
-            # So current_codes are from the previous (higher compression) level
-            source_codes_for_context = current_codes
+        # Use codes from previous level as context (if this generator is conditional)
+        # Hierarchy runs highest compression first, so current_codes are already at source resolution
+        source_codes_for_context = current_codes if source_vqvae_key is not None else None
+        
+        # Get temperature for this level
+        # If fewer temperatures than levels, last value is reused
+        level_idx = generator_names.index(gen_name)
+        level_temp = temperatures[level_idx] if level_idx < len(temperatures) else temperatures[-1]
         
         # Generate codes
         current_codes = generate_codes(
             generator, context_model, level_num_codes,
             source_codes_for_context,
-            temperature=args.temperature,
+            temperature=level_temp,
             top_k=args.top_k,
             top_p=args.top_p,
             seed=args.seed if gen_name == generator_names[0] else None,
@@ -499,22 +495,9 @@ Examples:
             
             print(f"Playing intermediate audio: {len(intermediate_audio)} samples ({len(intermediate_audio) / SAMPLE_RATE:.2f} seconds)")
             try:
-                import pyaudio
-                p = pyaudio.PyAudio()
-                stream = p.open(
-                    format=pyaudio.paFloat32,
-                    channels=1,
-                    rate=SAMPLE_RATE,
-                    output=True
-                )
-                stream.write(intermediate_audio.tobytes())
-                stream.stop_stream()
-                stream.close()
-                p.terminate()
-                print("Intermediate playback complete!")
+                play_audio(intermediate_audio, SAMPLE_RATE)
             except Exception as e:
                 print(f"Error during intermediate playback: {e}")
-                print("Skipping intermediate playback...")
     
     # Decode final codes to audio
     print(f"\nDecoding {len(current_codes)} codes to audio...")
@@ -546,18 +529,7 @@ Examples:
     else:
         print("Playing audio...")
         try:
-            import pyaudio
-            p = pyaudio.PyAudio()
-            stream = p.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=SAMPLE_RATE,
-                output=True
-            )
-            stream.write(audio.tobytes())
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
+            play_audio(audio, SAMPLE_RATE)
             print("Playback complete!")
         except Exception as e:
             print(f"Error during playback: {e}")
