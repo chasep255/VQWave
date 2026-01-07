@@ -109,15 +109,19 @@ GENERATOR_CONFIGS = {
     "generator_64": {
         "source_vqvae": "vqvae_1024",  # Context from 1024x codes
         "dest_vqvae": "vqvae_64",  # Generates codes for 64x compression
-        "lstm_units": 256,
+        "lstm_units": 512,
         "lstm_layers": 2,
         # Context model configuration
-        "context_dim": 256,  # Output dimension of context features
-        "context_channels": 512,  # Intermediate channels in context model dilated CNN
-        "context_dilations": [1, 2, 4, 8],  # Dilation rates for each layer
-        "context_kernel_size": 3,  # Kernel size for dilated conv layers
-        "context_activation": "elu",  # Activation function
-        "context_upsample_factor": 16,  # Upsample factor (1024x -> 128x = 8x)
+        "context_layers": [
+            # Regular CNN layers for processing
+            {"channels": 512, "kernel": 9, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "activation": "elu"},
+            # Upsample with transpose convolutions (4x * 4x = 16x total)
+            {"channels": 256, "kernel": 12, "stride": 4, "transpose": True, "activation": "elu"},
+            {"channels": 128, "kernel": 12, "stride": 4, "transpose": True, "activation": "elu"}
+        ],
     },
     "generator_16": {
         "source_vqvae": "vqvae_128",  # Context from 128x codes
@@ -125,11 +129,16 @@ GENERATOR_CONFIGS = {
         "lstm_units": 128,
         "lstm_layers": 2,
         # Context model configuration
-        "context_dim": 128,  # Output dimension of context features
-        "context_channels": 256,  # Intermediate channels in context model dilated CNN
-        "context_dilations": [1, 2, 4, 8, 16, 32],  # Dilation rates for each layer
-        "context_kernel_size": 3,  # Kernel size for dilated conv layers
-        "context_activation": "elu",  # Activation function
-        "context_upsample_factor": 8,  # Upsample factor (128x -> 16x = 8x)
+        "context_layers": [
+            # Dilated CNN layers for large receptive field
+            {"channels": 256, "kernel": 3, "dilation": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 3, "dilation": 2, "activation": "elu"},
+            {"channels": 256, "kernel": 3, "dilation": 4, "activation": "elu"},
+            {"channels": 256, "kernel": 3, "dilation": 8, "activation": "elu"},
+            {"channels": 256, "kernel": 3, "dilation": 16, "activation": "elu"},
+            {"channels": 256, "kernel": 3, "dilation": 32, "activation": "elu"},
+            # Upsample with transpose convolution (128x -> 16x = 8x)
+            {"channels": 128, "kernel": 8, "stride": 8, "activation": "elu", "transpose": True},
+        ],
     },
 }

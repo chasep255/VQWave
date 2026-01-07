@@ -61,6 +61,7 @@ LOSS_FUNCTIONS = {
 }
 
 
+@tf.function
 def train_step(encoder, decoder, codebook, optimizer, restarter, r, loss_fn):
     """Single training step."""
     with tf.GradientTape() as tape:

@@ -13,30 +13,26 @@ class ContextModel(Model):
     """
     Context model for conditioning generators on lower-resolution codes.
     
-    Processes lower-res codes (e.g., 512x) with dilated CNN and upsamples 4x
+    Processes lower-res codes (e.g., 512x) with dilated CNN and upsamples
     to condition higher-res generation (e.g., 128x).
     """
     
-    def __init__(self, num_codes, embedding_dim=64, context_dim=512, context_channels=512,
-                 context_dilations=None, context_kernel_size=3,
-                 context_activation='elu', context_upsample_factor=4, name='context_model', **kwargs):
+    def __init__(self, num_codes, embedding_dim, context_layers, 
+                 name='context_model', **kwargs):
         """
-        Initialize ContextModel with configuration.
+        Initialize ContextModel with layer-based configuration.
         
         Args:
             num_codes: Size of codebook for lower-res codes
             embedding_dim: Dimension of code embeddings
-            context_dim: Dimension of output context features
-            context_channels: Number of channels in intermediate dilated CNN layers
-            context_dilations: List of dilation rates for each layer (default: [1, 2, 4, 8, 16, 32])
-            context_kernel_size: Kernel size for dilated conv layers
-            context_activation: Activation function for conv layers
-            context_upsample_factor: Upsample factor (e.g., 4 for 4x upsampling)
+            context_layers: List of layer configs, each with:
+                - channels: Number of output channels
+                - kernel: Kernel size
+                - stride: Stride (for transpose conv, this is the upsample factor)
+                - dilation: Dilation rate (for regular conv)
+                - activation: Activation function
+                - transpose: If True, use Conv1DTranspose (for upsampling)
         """
-        if context_dilations is None:
-            context_dilations = [1, 2, 4, 8, 16, 32]
-        
-        context_layers = len(context_dilations)
         
         # Define input (variable length sequence of lower-res integer codes)
         input_codes = Input((None,), dtype='int32', name='context_codes_input')
@@ -44,39 +40,41 @@ class ContextModel(Model):
         # Embed integer codes
         x = layers.Embedding(num_codes, embedding_dim, name='context_embedding')(input_codes)
         
-        # Dilated CNN layers for large receptive field
-        # Start with smaller dilation, increase for wider context
-        for i, dilation in enumerate(context_dilations):
-            x = layers.Conv1D(
-                context_channels,
-                context_kernel_size,
-                padding='same',
-                dilation_rate=dilation,
-                activation=context_activation,
-                name=f'context_conv{i+1}'
-            )(x)
+        # Process layers
+        for i, layer_config in enumerate(context_layers):
+            channels = layer_config["channels"]
+            kernel = layer_config["kernel"]
+            activation = layer_config["activation"]
+            is_transpose = layer_config.get("transpose", False)
+            
+            if is_transpose:
+                # Transpose convolution for upsampling
+                stride = layer_config["stride"]
+                x = layers.Conv1DTranspose(
+                    channels,
+                    kernel,
+                    strides=stride,
+                    padding='same',
+                    activation=activation,
+                    dtype='float32',
+                    name=f'context_conv{i+1}'
+                )(x)
+            else:
+                # Regular dilated convolution
+                dilation = layer_config.get("dilation", 1)
+                x = layers.Conv1D(
+                    channels,
+                    kernel,
+                    padding='same',
+                    dilation_rate=dilation,
+                    activation=activation,
+                    name=f'context_conv{i+1}'
+                )(x)
         
-        # Upsample with transpose convolution
-        outputs = layers.Conv1DTranspose(
-            context_dim,
-            context_upsample_factor,
-            strides=context_upsample_factor,
-            padding='same',
-            activation=context_activation,
-            dtype='float32',
-            name='context_output'
-        )(x)
-        
-        super().__init__(inputs=input_codes, outputs=outputs, name=name, **kwargs)
+        super().__init__(inputs=input_codes, outputs=x, name=name, **kwargs)
         self.num_codes = num_codes
         self.embedding_dim = embedding_dim
-        self.context_dim = context_dim
-        self.context_channels = context_channels
         self.context_layers = context_layers
-        self.context_dilations = context_dilations
-        self.context_kernel_size = context_kernel_size
-        self.context_activation = context_activation
-        self.context_upsample_factor = context_upsample_factor
 
 
 class Generator(Model):
@@ -146,6 +144,9 @@ class Generator(Model):
             )
             lstm_layers_list.append(lstm_layer)
             x = lstm_layer(x)
+
+        if context_dim is not None:
+            x = layers.Concatenate(axis=-1, name='concat_context_output')([x, input_context])
 
         x = layers.Conv1D(
             lstm_units, 1,
@@ -253,23 +254,46 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
         # Derive context model parameters from source VQ-VAE
         context_num_codes = source_vqvae["num_codes"]
         context_embedding_dim = source_vqvae["code_dim"]
-        context_dim = config.get("context_dim", 512)
-        context_channels = config.get("context_channels", 512)
-        context_dilations = config.get("context_dilations", [1, 2, 4, 8, 16, 32])
-        context_kernel_size = config.get("context_kernel_size", 3)
-        context_activation = config.get("context_activation", "elu")
-        context_upsample_factor = config.get("context_upsample_factor", 4)
+        
+        # Get layer-based context configuration (new format)
+        context_layers = config.get("context_layers")
+        
+        # Fallback to old format for backward compatibility
+        if context_layers is None:
+            context_dim = config.get("context_dim", 512)
+            context_channels = config.get("context_channels", 512)
+            context_dilations = config.get("context_dilations", [1, 2, 4, 8, 16, 32])
+            context_kernel_size = config.get("context_kernel_size", 3)
+            context_activation = config.get("context_activation", "elu")
+            context_upsample_factor = config.get("context_upsample_factor", 4)
+            
+            # Convert old format to new format
+            context_layers = [
+                {
+                    "channels": context_channels,
+                    "kernel": context_kernel_size,
+                    "dilation": dilation,
+                    "activation": context_activation,
+                }
+                for dilation in context_dilations
+            ]
+            # Add transpose layer for upsampling
+            context_layers.append({
+                "channels": context_dim,
+                "kernel": context_upsample_factor,
+                "stride": context_upsample_factor,
+                "activation": context_activation,
+                "transpose": True,
+            })
+        
+        # Extract context_dim from last layer for generator
+        context_dim = context_layers[-1]["channels"]
         
         # Create context model
         context_model = ContextModel(
             num_codes=context_num_codes,
             embedding_dim=context_embedding_dim,
-            context_dim=context_dim,
-            context_channels=context_channels,
-            context_dilations=context_dilations,
-            context_kernel_size=context_kernel_size,
-            context_activation=context_activation,
-            context_upsample_factor=context_upsample_factor,
+            context_layers=context_layers,
             name=f"{config_name}_context"
         )
         

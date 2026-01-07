@@ -33,8 +33,9 @@ soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
 
+@tf.function
 def train_step(dest_encoder, dest_codebook, generator, context_model, 
-               source_encoder, source_codebook, optimizer, fp16, audio_batch):
+               source_encoder, source_codebook, optimizer, audio_batch):
     """
     Single training step for generator.
     
@@ -46,7 +47,6 @@ def train_step(dest_encoder, dest_codebook, generator, context_model,
         source_encoder: Source VQ-VAE encoder (None if unconditional)
         source_codebook: Source VQ-VAE codebook (None if unconditional)
         optimizer: Optimizer
-        fp16: Whether using mixed precision
         audio_batch: Audio batch [batch, samples]
     
     Returns:
@@ -283,7 +283,7 @@ def main():
             batch = data.random_batch(args.batch_size, args.input_length)[0]
             result = train_step(
                 dest_encoder, dest_codebook, generator, context_model,
-                source_encoder, source_codebook, opt, args.fp16, batch
+                source_encoder, source_codebook, opt, batch
             )
             
             loss_acc.add(result['loss'])

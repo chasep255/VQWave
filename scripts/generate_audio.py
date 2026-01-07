@@ -103,6 +103,80 @@ def code_to_ascii(code: int) -> str:
     return "".join(reversed(out))
 
 
+def _make_generate_loop(generator, has_context, sampling_mode, temperature, top_k, top_p):
+    """
+    Create a compiled generation loop function for fast inference.
+    
+    Returns a tf.function that generates codes in a single graph execution.
+    """
+    
+    @tf.function
+    def generate_loop_unconditional(initial_code, num_codes):
+        """Fast generation loop without context."""
+        codes = tf.TensorArray(dtype=tf.int32, size=num_codes, dynamic_size=False)
+        codes = codes.write(0, initial_code)
+        current_code = initial_code
+        
+        for i in tf.range(1, num_codes):
+            input_code = tf.reshape(current_code, [1, 1])
+            logits = generator(input_code, training=False)
+            logits = logits[0, 0]  # [num_codes]
+            
+            # Sample based on mode
+            if sampling_mode == 'top_p':
+                next_code = sample_top_p(logits, top_p, temperature)
+            elif sampling_mode == 'top_k':
+                next_code = sample_top_k(logits, top_k, temperature)
+            elif sampling_mode == 'temperature':
+                next_code = sample_temperature(logits, temperature)
+            else:
+                next_code = sample_greedy(logits)
+            
+            codes = codes.write(i, next_code)
+            current_code = next_code
+        
+        return codes.stack()
+    
+    @tf.function
+    def generate_loop_with_context(initial_code, num_codes, context_sequence):
+        """Fast generation loop with context."""
+        codes = tf.TensorArray(dtype=tf.int32, size=num_codes, dynamic_size=False)
+        codes = codes.write(0, initial_code)
+        current_code = initial_code
+        context_len = tf.shape(context_sequence)[0]
+        
+        for i in tf.range(1, num_codes):
+            input_code = tf.reshape(current_code, [1, 1])
+            
+            # Get context for current position
+            context_pos = tf.minimum(i - 1, context_len - 1)
+            context_step = context_sequence[context_pos:context_pos+1]  # [1, context_dim]
+            context_step = tf.expand_dims(context_step, 0)  # [1, 1, context_dim]
+            
+            logits = generator([input_code, context_step], training=False)
+            logits = logits[0, 0]  # [num_codes]
+            
+            # Sample based on mode
+            if sampling_mode == 'top_p':
+                next_code = sample_top_p(logits, top_p, temperature)
+            elif sampling_mode == 'top_k':
+                next_code = sample_top_k(logits, top_k, temperature)
+            elif sampling_mode == 'temperature':
+                next_code = sample_temperature(logits, temperature)
+            else:
+                next_code = sample_greedy(logits)
+            
+            codes = codes.write(i, next_code)
+            current_code = next_code
+        
+        return codes.stack()
+    
+    if has_context:
+        return generate_loop_with_context
+    else:
+        return generate_loop_unconditional
+
+
 def generate_codes(generator, context_model, num_codes, source_codes, 
                    temperature=None, top_k=None, top_p=None, seed=None, show_codes=False):
     """
@@ -124,73 +198,63 @@ def generate_codes(generator, context_model, num_codes, source_codes,
     """
     generator.reset_states()
     
-    codes = []
-    
-    # Pre-compute full context if needed (outside generation loop for efficiency)
-    context_sequence = None
-    if context_model is not None and source_codes is not None:
-        # Process all source codes through context model at once
-        source_codes_tensor = tf.constant([source_codes], dtype=tf.int32)  # [1, source_len]
-        context_sequence = context_model(source_codes_tensor, training=False)  # [1, target_len, context_dim]
-        context_sequence = context_sequence[0]  # [target_len, context_dim]
-        # Context is upsampled 4x, so it should match or exceed num_codes
-        context_len = int(context_sequence.shape[0]) if context_sequence.shape[0] is not None else int(tf.shape(context_sequence)[0].numpy())
+    # Determine sampling mode and parameters
+    if top_p is not None:
+        sampling_mode = 'top_p'
+        temp = temperature if temperature is not None else 1.0
+    elif top_k is not None:
+        sampling_mode = 'top_k'
+        temp = temperature if temperature is not None else 1.0
+    elif temperature is not None:
+        sampling_mode = 'temperature'
+        temp = temperature
     else:
-        context_len = 0
+        sampling_mode = 'greedy'
+        temp = 1.0
+    
+    # Convert parameters to tensors
+    temp_tensor = tf.constant(temp, dtype=tf.float32)
+    top_k_tensor = tf.constant(top_k if top_k is not None else 1, dtype=tf.int32)
+    top_p_tensor = tf.constant(top_p if top_p is not None else 0.9, dtype=tf.float32)
+    
+    # Pre-compute full context if needed
+    context_sequence = None
+    has_context = context_model is not None and source_codes is not None
+    if has_context:
+        source_codes_tensor = tf.constant([source_codes], dtype=tf.int32)
+        context_sequence = context_model(source_codes_tensor, training=False)
+        context_sequence = context_sequence[0]  # [target_len, context_dim]
     
     # Initial code
     if seed is not None:
-        current_code = seed
+        initial_code = tf.constant(seed, dtype=tf.int32)
     else:
-        current_code = np.random.randint(0, generator.num_codes)
+        initial_code = tf.random.uniform([], 0, generator.num_codes, dtype=tf.int32)
     
-    codes.append(current_code)
+    # Get compiled generation function
+    generate_fn = _make_generate_loop(
+        generator, has_context, sampling_mode, 
+        temp_tensor, top_k_tensor, top_p_tensor
+    )
+    
+    # Run generation
+    num_codes_tensor = tf.constant(num_codes, dtype=tf.int32)
+    if has_context:
+        codes = generate_fn(initial_code, num_codes_tensor, context_sequence)
+    else:
+        codes = generate_fn(initial_code, num_codes_tensor)
+    
+    codes = codes.numpy()
+    
+    # Print codes if requested (after generation for speed)
     if show_codes:
-        print(code_to_ascii(int(current_code)), end='', flush=True)
-    
-    # Generate remaining codes
-    for i in range(num_codes - 1):
-        # Prepare input
-        input_code = tf.constant([[current_code]], dtype=tf.int32)
-        
-        # Get context if needed
-        if context_sequence is not None:
-            # Get context for current position
-            context_pos = min(i, context_len - 1)
-            context_step = context_sequence[context_pos:context_pos+1]  # [1, context_dim]
-            context_step = tf.expand_dims(context_step, 0)  # [1, 1, context_dim]
-            logits = generator([input_code, context_step], training=False)
-        else:
-            logits = generator(input_code, training=False)
-        
-        # logits shape: [1, 1, num_codes]
-        logits = logits[0, 0]  # [num_codes]
-        
-        # Sample next code (priority: top_p > top_k > temperature > greedy)
-        if top_p is not None:
-            # Top-p (nucleus) sampling with optional temperature
-            next_code = sample_top_p(logits, top_p, temperature=temperature)
-        elif top_k is not None:
-            # Top-k with optional temperature
-            next_code = sample_top_k(logits, top_k, temperature=temperature)
-        elif temperature is not None:
-            next_code = sample_temperature(logits, temperature)
-        else:
-            next_code = sample_greedy(logits)
-        
-        current_code = int(next_code.numpy())
-        codes.append(current_code)
-        
-        if show_codes:
-            print(code_to_ascii(int(current_code)), end='', flush=True)
-            # New line every 80 codes (i+2 because we already printed first code)
-            if (i + 2) % 80 == 0:
+        for i, code in enumerate(codes):
+            print(code_to_ascii(int(code)), end='', flush=True)
+            if (i + 1) % 80 == 0:
                 print()
-    
-    if show_codes:
         print()  # Final newline
     
-    return np.array(codes, dtype=np.int32)
+    return codes
 
 
 def main():
