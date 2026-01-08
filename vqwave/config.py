@@ -38,6 +38,37 @@ ENCODER_CONFIGS = {
             {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
+
+    "vqvae_256": {
+        "compression_rate": 256,
+        "num_codes": 1024,
+        "code_dim": 32,
+        "encoder_layers": [
+            # 4^4 = 256
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu"},
+            # Frame-rate refinement
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+        ],
+        "decoder_layers": [
+            # Mirror refinement first
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 256, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^4 = 256
+            {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
+        ],
+    },
+
     "vqvae_64": {
         "compression_rate": 64,
         "num_codes": 1024,
@@ -67,16 +98,15 @@ ENCODER_CONFIGS = {
             {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
-    "vqvae_8": {
-        "compression_rate": 8,
+
+    "vqvae_16": {
+        "compression_rate": 16,
         "num_codes": 1024,
         "code_dim": 32,
         "encoder_layers": [
-            # 2^3 = 8
-            {"channels": 16, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu"},
-            {"channels": 64, "kernel": 6, "stride": 2, "activation": "elu"},
-
+            # 4^2 = 16
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+            {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
             # Frame-rate refinement
             {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
             {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
@@ -89,10 +119,33 @@ ENCODER_CONFIGS = {
             {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
             {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
             {"channels": 64, "kernel": 9, "stride": 1, "activation": "elu"},
-            # 2^3 = 8
-            {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 16, "kernel": 6, "stride": 2, "activation": "elu", "transpose": True},
-            {"channels": 1, "kernel": 6, "stride": 2, "activation": "tanh", "transpose": True},
+            # 4^2 = 16
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
+        ],
+    },
+    "vqvae_4": {
+        "compression_rate": 4,
+        "num_codes": 1024,
+        "code_dim": 32,
+        "encoder_layers": [
+            # 4^1 = 4
+            {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
+
+            # Frame-rate refinement
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+        ],
+        "decoder_layers": [
+            # Mirror refinement first
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            {"channels": 32, "kernel": 9, "stride": 1, "activation": "elu"},
+            # 4^1 = 4
+            {"channels": 1, "kernel": 12, "stride": 4, "activation": "tanh", "transpose": True},
         ],
     },
 }
@@ -146,30 +199,14 @@ GENERATOR_CONFIGS = {
         "generator_layers": [
             # Initial projection: embed_dim (32) -> 512 channels
             {"type": "context_concat"},
-            {"type": "causal_conv", "channels": 512, "kernel": 2, "dilation": 1},
-            
-            # ResNet blocks with increasing dilation
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
-
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
-            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
-
-            {"type": "activation", "activation": "elu"},
+            {"type": "lstm", "units": 512}, 
             {"type": "context_concat"},
             {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
+            {"type": "lstm", "units": 512}, 
+            {"type": "context_concat"},
+            {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
+            {"type": "lstm", "units": 512}, 
+            {"type": "context_concat"},
             {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
         ],
         # Context model configuration

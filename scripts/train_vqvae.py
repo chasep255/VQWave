@@ -41,6 +41,45 @@ def stft_loss(y, r):
     return tf.reduce_mean(loss)
 
 
+@tf.function
+def mel_loss(y, r, sample_rate=SAMPLE_RATE, n_mels=80, fft_length=2048, hop_length=512):
+    """
+    Compute mel spectrogram loss (not log mel).
+    
+    Args:
+        y: Generated audio [batch, samples]
+        r: Reference audio [batch, samples]
+        sample_rate: Sample rate (default: SAMPLE_RATE)
+        n_mels: Number of mel bins (default: 80)
+        fft_length: FFT window size (default: 2048)
+        hop_length: Hop length for STFT (default: 512)
+    """
+    # Compute STFT magnitude spectrograms
+    y_stft = tf.signal.stft(y, fft_length, hop_length, fft_length, pad_end=True)
+    r_stft = tf.signal.stft(r, fft_length, hop_length, fft_length, pad_end=True)
+    
+    y_mag = tf.abs(y_stft)  # [batch, time, freq]
+    r_mag = tf.abs(r_stft)  # [batch, time, freq]
+    
+    # Number of frequency bins is fft_length // 2 + 1
+    num_spectrogram_bins = fft_length // 2 + 1
+    
+    # Create mel filterbank matrix
+    mel_matrix = tf.signal.linear_to_mel_weight_matrix(
+        num_mel_bins=n_mels,
+        num_spectrogram_bins=num_spectrogram_bins,
+        sample_rate=sample_rate,
+        lower_edge_hertz=0.0,
+        upper_edge_hertz=sample_rate / 2.0
+    )
+    
+    # Apply mel filterbank (not log)
+    y_mel = tf.tensordot(y_mag, mel_matrix, axes=1)  # [batch, time, n_mels]
+    r_mel = tf.tensordot(r_mag, mel_matrix, axes=1)  # [batch, time, n_mels]
+    
+    # L1 loss on mel spectrograms
+    return tf.reduce_mean(tf.abs(y_mel - r_mel))
+
 
 @tf.function
 def mse_loss(y, r):
@@ -57,6 +96,7 @@ def mse_loss(y, r):
 # Loss function registry
 LOSS_FUNCTIONS = {
     'stft': stft_loss,
+    'mel': mel_loss,
     'mse': mse_loss
 }
 
@@ -130,10 +170,10 @@ def main():
                        help='Codebook reset limit (default: 256)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=2.5e-4,
                        help='Initial learning rate (default: 2e-4)')
-    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.5,
-                       help='Learning rate decay rate (default: 0.5, halves every decay_steps)')
+    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.9,
+                       help='Learning rate decay rate (default: 0.9)')
     parser.add_argument('--decay-steps', type=int, default=None,
-                       help='Number of steps for each decay (default: steps * 10)')
+                       help='Number of steps for each decay (default: epoch_steps)')
     parser.add_argument('--loss', type=str, default='stft',
                        choices=list(LOSS_FUNCTIONS.keys()),
                        help=f'Loss function to use (default: stft, choices: {", ".join(LOSS_FUNCTIONS.keys())})')
@@ -198,7 +238,7 @@ def main():
     print('%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
     
     # Setup optimizer with learning rate schedule
-    decay_steps = args.decay_steps if args.decay_steps is not None else args.epoch_steps * 10
+    decay_steps = args.decay_steps if args.decay_steps is not None else args.epoch_steps
     base_lr = tf.keras.optimizers.schedules.ExponentialDecay(
         args.learning_rate, decay_steps, args.decay_rate
     )
