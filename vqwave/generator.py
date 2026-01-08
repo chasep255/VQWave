@@ -7,6 +7,7 @@ from tensorflow import keras
 from tensorflow.keras import layers, Input, Model
 
 from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS
+from vqwave.layers import ShiftBuffer, CausalQueue, CausalConv1D
 
 
 class ContextModel(Model):
@@ -79,25 +80,33 @@ class ContextModel(Model):
 
 class Generator(Model):
     """
-    First-level generator: 2-stacked LSTM for autoregressive code prediction.
+    Autoregressive generator for code prediction with configurable architecture.
     
     Takes integer codes from the VQ-VAE codebook and predicts the next code.
     Can optionally be conditioned on context from lower-resolution codes.
     Supports both training (non-stateful) and inference (stateful) modes.
     """
     
-    def __init__(self, num_codes, embedding_dim=32, lstm_units=1024, lstm_layers=2, 
+    def __init__(self, num_codes, embedding_dim=32, generator_layers=None,
                  context_dim=None, stateful=False, batch_size=None, name='generator', **kwargs):
         """
-        Initialize Generator with configuration.
+        Initialize Generator with layer-based configuration.
         
         Args:
             num_codes: Size of codebook (vocab size for prediction)
             embedding_dim: Dimension of code embeddings
-            lstm_units: Number of units in each LSTM layer
-            lstm_layers: Number of stacked LSTM layers
+            generator_layers: List of layer configs, each with:
+                - {"type": "lstm", "units": 512} - LSTM layer
+                - {"type": "gru", "units": 512} - GRU layer
+                - {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"} - Conv1D layer
+                - {"type": "causal_conv", "channels": 512, "kernel": 3, "dilation": 2, "activation": "elu"} - Causal Conv1D (stateful)
+                - {"type": "highway", "channels": 512, "kernel": 3, "dilation": 2} - Highway layer (tanh transform, sigmoid gate)
+                - {"type": "residual", "channels": 512, "kernel": 3, "dilation": 2, "activation": "elu"} - Pre-activated residual block
+                - {"type": "layer_norm"} - LayerNormalization layer
+                - {"type": "activation", "activation": "elu"} - Activation layer
+                - {"type": "context_concat"} - Concatenate context at this point
             context_dim: Dimension of context features (if None, no context conditioning)
-            stateful: If True, LSTM layers are stateful (for inference mode)
+            stateful: If True, RNN layers are stateful (for inference mode)
             batch_size: Batch size (required if stateful=True)
         """
         if stateful and batch_size is None:
@@ -132,27 +141,177 @@ class Generator(Model):
             # Concatenate along channel dimension: [batch, time, embedding_dim + context_dim]
             x = layers.Concatenate(axis=-1, name='concat_context_input')([x, input_context])
         
-        # Stacked LSTM layers with context concatenation (stateful for inference mode)
-        lstm_layers_list = []
-        for i in range(lstm_layers):
-            # LSTM layer
-            lstm_layer = layers.LSTM(
-                lstm_units,
-                return_sequences=True,
-                stateful=stateful,
-                name=f'lstm_{i+1}'
-            )
-            lstm_layers_list.append(lstm_layer)
-            x = lstm_layer(x)
+        # Process configurable layers
+        if generator_layers is None:
+            raise ValueError("generator_layers must be provided explicitly in the generator config")
+        
+        layer_idx = 0
+        
+        for layer_config in generator_layers:
+            layer_type = layer_config["type"]
+            
+            if layer_type == "lstm":
+                units = layer_config["units"]
+                rnn_layer = layers.LSTM(
+                    units,
+                    return_sequences=True,
+                    stateful=stateful,
+                    name=f'rnn_{layer_idx+1}'
+                )
+                x = rnn_layer(x)
+                layer_idx += 1
+                
+            elif layer_type == "gru":
+                units = layer_config["units"]
+                rnn_layer = layers.GRU(
+                    units,
+                    return_sequences=True,
+                    stateful=stateful,
+                    name=f'rnn_{layer_idx+1}'
+                )
+                x = rnn_layer(x)
+                layer_idx += 1
+                
+            elif layer_type == "conv":
+                channels = layer_config["channels"]
+                kernel = layer_config["kernel"]
+                activation = layer_config.get("activation", "elu")
+                x = layers.Conv1D(
+                    channels,
+                    kernel,
+                    padding='same',  # Preserve sequence length
+                    activation=activation,
+                    name=f'conv_{layer_idx+1}'
+                )(x)
+                layer_idx += 1
+                
+            elif layer_type == "causal_conv":
+                channels = layer_config["channels"]
+                kernel = layer_config["kernel"]
+                activation = layer_config.get("activation", "elu")
+                dilation = layer_config.get("dilation", 1)
+                
+                causal_layer = CausalConv1D(
+                    channels, kernel, dilation=dilation, activation=activation,
+                    stateful=stateful, name=f'causal_conv_{layer_idx+1}'
+                )
+                x = causal_layer(x)
+                layer_idx += 1
+                
+            elif layer_type == "layer_norm":
+                x = layers.LayerNormalization(name=f'layer_norm_{layer_idx+1}')(x)
+                layer_idx += 1
+                
+            elif layer_type == "activation":
+                activation = layer_config.get("activation", "elu")
+                x = layers.Activation(activation, name=f'activation_{layer_idx+1}')(x)
+                layer_idx += 1
+            
+            elif layer_type == "highway":
+                # Highway network: y = H(x) * T(x) + x * (1 - T(x))
+                # H = transform (causal conv + tanh)
+                # T = gate (causal conv + sigmoid)
+                channels = layer_config["channels"]
+                kernel = layer_config["kernel"]
+                dilation = layer_config.get("dilation", 1)
+                
+                receptive_field = (kernel - 1) * dilation + 1
+                
 
-        if context_dim is not None:
-            x = layers.Concatenate(axis=-1, name='concat_context_output')([x, input_context])
-
-        x = layers.Conv1D(
-            lstm_units, 1,
-            activation='swish',
-            name='output_conv'
-        )(x)
+                
+                if stateful:
+                    # Stateful mode: use buffer
+                    # For kernel=2: use CausalQueue - queue handles dilation, conv uses dilation=1
+                    # Otherwise: use ShiftBuffer for full receptive field
+                    if kernel == 2:
+                        causal_queue = CausalQueue(dilation)
+                        buffered = causal_queue(x)
+                        conv_dilation = 1  # Queue handles dilation
+                    else:
+                        shift_buffer = ShiftBuffer(receptive_field)
+                        buffered = shift_buffer(x)
+                        conv_dilation = dilation
+                    
+                    # Transform path H(x) - always tanh
+                    h = layers.Conv1D(
+                        channels, kernel, padding='valid', dilation_rate=conv_dilation,
+                        activation='tanh', name=f'highway_h_{layer_idx+1}'
+                    )(buffered)
+                    
+                    # Gate path T(x) - always sigmoid, bias initialized to -1 (gate starts closed)
+                    t = layers.Conv1D(
+                        channels, kernel, padding='valid', dilation_rate=conv_dilation,
+                        activation='sigmoid', 
+                        bias_initializer=tf.keras.initializers.Constant(-1.0),
+                        name=f'highway_t_{layer_idx+1}'
+                    )(buffered)
+                else:
+                    # Training mode: causal padding
+                    h = layers.Conv1D(
+                        channels, kernel, padding='causal', dilation_rate=dilation,
+                        activation='tanh', name=f'highway_h_{layer_idx+1}'
+                    )(x)
+                    
+                    # Gate path T(x) - always sigmoid, bias initialized to -1 (gate starts closed)
+                    t = layers.Conv1D(
+                        channels, kernel, padding='causal', dilation_rate=dilation,
+                        activation='sigmoid',
+                        bias_initializer=tf.keras.initializers.Constant(-1.0),
+                        name=f'highway_t_{layer_idx+1}'
+                    )(x)
+                
+                # Highway combination: y = H * T + x * (1 - T)
+                x = h * t + x * (1.0 - t)
+                layer_idx += 1
+            
+            elif layer_type == "residual":
+                # Pre-activated residual block: x → activation → conv1 → activation → conv2 → + x
+                channels = layer_config["channels"]
+                kernel = layer_config["kernel"]
+                activation = layer_config.get("activation", "elu")
+                dilation = layer_config.get("dilation", 1)
+                
+                # Store input for residual connection - conv2 projects back to this channel size
+                residual = x
+                # Get input channel size (for conv2 output)
+                residual_channels = residual.shape[-1]
+                if residual_channels is None:
+                    raise ValueError(
+                        "Residual block requires a known (static) channel dimension on its input so conv2 can project back. "
+                        "Add a projection conv before the residual block so channels are statically known."
+                    )
+                
+                # Pre-activation: apply activation before conv1
+                x = layers.Activation(activation, name=f'residual_act1_{layer_idx+1}')(x)
+                
+                # First causal conv (can change channel size)
+                conv1 = CausalConv1D(
+                    channels, kernel, dilation=dilation, activation=None,
+                    stateful=stateful, name=f'residual_conv1_{layer_idx+1}'
+                )
+                x = conv1(x)
+                
+                # Pre-activation before conv2
+                x = layers.Activation(activation, name=f'residual_act2_{layer_idx+1}')(x)
+                
+                # Second conv: always 1x1, projects back to residual input channel size
+                x = layers.Conv1D(
+                    residual_channels, 1, padding='same', activation=None,
+                    name=f'residual_conv2_{layer_idx+1}'
+                )(x)
+                
+                # Residual connection
+                x = x + residual
+                layer_idx += 1
+                
+            elif layer_type == "context_concat":
+                if context_dim is None:
+                    raise ValueError("context_concat layer requires context_dim to be set")
+                x = layers.Concatenate(axis=-1, name=f'context_concat_{layer_idx+1}')([x, input_context])
+                layer_idx += 1
+                
+            else:
+                raise ValueError(f"Unknown layer type: {layer_type}")
         
         # Output logits over codebook (one logit per code)
         outputs = layers.Conv1D(
@@ -164,45 +323,22 @@ class Generator(Model):
         super().__init__(inputs=inputs, outputs=outputs, name=name, **kwargs)
         self.num_codes = num_codes
         self.embedding_dim = embedding_dim
-        self.lstm_units = lstm_units
-        self.lstm_layers = lstm_layers
+        self.generator_layers = generator_layers
         self.context_dim = context_dim
         self.stateful = stateful
         self.batch_size = batch_size
-        self.lstm_layers_list = lstm_layers_list
     
     def reset_states(self):
         """
-        Reset LSTM states (for stateful inference mode).
+        Reset RNN states (for stateful inference mode).
         Call this before starting a new sequence.
         """
         if not self.stateful:
             raise RuntimeError("reset_states() can only be called when stateful=True")
-        for lstm_layer in self.lstm_layers_list:
-            lstm_layer.reset_states()
-    
-    def get_states(self):
-        """
-        Get current LSTM states (for stateful inference mode).
-        Returns tuple of states, one per LSTM layer, where each state is (h, c).
-        """
-        if not self.stateful:
-            raise RuntimeError("get_states() can only be called when stateful=True")
-        return tuple(lstm_layer.states for lstm_layer in self.lstm_layers_list)
-    
-    def set_states(self, states):
-        """
-        Set LSTM states (for stateful inference mode).
-        
-        Args:
-            states: Tuple of states, one per LSTM layer, where each state is (h, c).
-        """
-        if not self.stateful:
-            raise RuntimeError("set_states() can only be called when stateful=True")
-        if len(states) != len(self.lstm_layers_list):
-            raise ValueError(f"Expected {len(self.lstm_layers_list)} states, got {len(states)}")
-        for lstm_layer, state in zip(self.lstm_layers_list, states):
-            lstm_layer.states = state
+        # Find all layers with reset_states method (LSTM, GRU, CausalConv1D, CausalQueue, ShiftBuffer)
+        for layer in self.layers:
+            if hasattr(layer, 'reset_states'):
+                layer.reset_states()
 
 
 def create_generator(generator_config, stateful=False, batch_size=None, name=None):
@@ -238,8 +374,11 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
     # Derive generator parameters from dest VQ-VAE
     num_codes = dest_vqvae["num_codes"]
     embedding_dim = dest_vqvae["code_dim"]
-    lstm_units = config["lstm_units"]
-    lstm_layers = config.get("lstm_layers", 2)
+    
+    # Get generator layers configuration
+    generator_layers = config.get("generator_layers")
+    if generator_layers is None:
+        raise ValueError("generator_layers must be specified in generator config")
     
     # Check if we need context
     source_vqvae_key = config.get("source_vqvae")
@@ -255,36 +394,13 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
         context_num_codes = source_vqvae["num_codes"]
         context_embedding_dim = source_vqvae["code_dim"]
         
-        # Get layer-based context configuration (new format)
+        # Layer-based context configuration (required)
         context_layers = config.get("context_layers")
-        
-        # Fallback to old format for backward compatibility
         if context_layers is None:
-            context_dim = config.get("context_dim", 512)
-            context_channels = config.get("context_channels", 512)
-            context_dilations = config.get("context_dilations", [1, 2, 4, 8, 16, 32])
-            context_kernel_size = config.get("context_kernel_size", 3)
-            context_activation = config.get("context_activation", "elu")
-            context_upsample_factor = config.get("context_upsample_factor", 4)
-            
-            # Convert old format to new format
-            context_layers = [
-                {
-                    "channels": context_channels,
-                    "kernel": context_kernel_size,
-                    "dilation": dilation,
-                    "activation": context_activation,
-                }
-                for dilation in context_dilations
-            ]
-            # Add transpose layer for upsampling
-            context_layers.append({
-                "channels": context_dim,
-                "kernel": context_upsample_factor,
-                "stride": context_upsample_factor,
-                "activation": context_activation,
-                "transpose": True,
-            })
+            raise ValueError(
+                f"Generator config '{config_name}' uses context (source_vqvae={source_vqvae_key}) "
+                "but is missing required 'context_layers' list."
+            )
         
         # Extract context_dim from last layer for generator
         context_dim = context_layers[-1]["channels"]
@@ -301,8 +417,7 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
         generator = Generator(
             num_codes=num_codes,
             embedding_dim=embedding_dim,
-            lstm_units=lstm_units,
-            lstm_layers=lstm_layers,
+            generator_layers=generator_layers,
             context_dim=context_dim,
             stateful=stateful,
             batch_size=batch_size,
@@ -315,8 +430,7 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
         generator = Generator(
             num_codes=num_codes,
             embedding_dim=embedding_dim,
-            lstm_units=lstm_units,
-            lstm_layers=lstm_layers,
+            generator_layers=generator_layers,
             context_dim=None,
             stateful=stateful,
             batch_size=batch_size,

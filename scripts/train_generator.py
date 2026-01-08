@@ -133,7 +133,7 @@ def main():
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
                        help='Initial learning rate (default: 1e-3)')
-    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.8,
+    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.9,
                        help='Learning rate decay rate (default: 0.8)')
     parser.add_argument('--decay-steps', type=int, default=None,
                        help='Number of steps for each decay (default: epoch_steps)')

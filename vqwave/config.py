@@ -103,14 +103,75 @@ GENERATOR_CONFIGS = {
     "generator_1024": {
         "source_vqvae": None,  # Unconditional generation
         "dest_vqvae": "vqvae_1024",  # Generates codes for 1024x compression
-        "lstm_units": 512,
-        "lstm_layers": 3,
+        "generator_layers": [
+            # Initial projection: embed_dim (32) -> 512 channels
+            {"type": "causal_conv", "channels": 512, "kernel": 2, "dilation": 1},
+            
+            # ResNet blocks with increasing dilation
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
+
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
+
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
+
+            {"type": "activation", "activation": "elu"},
+            {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
+            {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
+        ],
     },
     "generator_64": {
         "source_vqvae": "vqvae_1024",  # Context from 1024x codes
         "dest_vqvae": "vqvae_64",  # Generates codes for 64x compression
-        "lstm_units": 512,
-        "lstm_layers": 2,
+        "generator_layers": [
+            # Initial projection: embed_dim (32) -> 512 channels
+            {"type": "context_concat"},
+            {"type": "causal_conv", "channels": 512, "kernel": 2, "dilation": 1},
+            
+            # ResNet blocks with increasing dilation
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
+
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 1, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 2, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 4, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 8, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 16, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 32, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 64, "activation": "elu"},
+            {"type": "residual", "channels": 512, "kernel": 2, "dilation": 128, "activation": "elu"},
+
+            {"type": "activation", "activation": "elu"},
+            {"type": "context_concat"},
+            {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
+            {"type": "conv", "channels": 512, "kernel": 1, "activation": "elu"},
+        ],
         # Context model configuration
         "context_layers": [
             # Regular CNN layers for processing
@@ -126,8 +187,14 @@ GENERATOR_CONFIGS = {
     "generator_16": {
         "source_vqvae": "vqvae_128",  # Context from 128x codes
         "dest_vqvae": "vqvae_16",  # Generates codes for 16x compression
-        "lstm_units": 128,
-        "lstm_layers": 2,
+        "generator_layers": [
+            {"type": "lstm", "units": 128},
+            {"type": "context_concat"},
+            {"type": "conv", "channels": 128, "kernel": 1, "activation": "elu"},
+            {"type": "lstm", "units": 128},
+            {"type": "context_concat"},
+            {"type": "conv", "channels": 128, "kernel": 1, "activation": "elu"},
+        ],
         # Context model configuration
         "context_layers": [
             # Dilated CNN layers for large receptive field

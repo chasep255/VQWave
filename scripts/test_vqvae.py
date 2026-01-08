@@ -10,12 +10,36 @@ import os
 import sys
 
 import numpy as np
-import pyaudio
 import tensorflow as tf
 
 from vqwave.encoder import Encoder, Decoder, CodebookManager
 from vqwave.config import ENCODER_CONFIGS, SAMPLE_RATE
 from vqwave.audio import load_audio, save_audio
+
+
+def play_audio(audio, sample_rate):
+    """Play audio with Ctrl+C support."""
+    import pyaudio
+    
+    CHUNK_SIZE = 4096  # Write in chunks for interruptibility
+    p = pyaudio.PyAudio()
+    stream = p.open(
+        format=pyaudio.paFloat32,
+        channels=1,
+        rate=sample_rate,
+        output=True
+    )
+    
+    try:
+        audio_bytes = audio.astype(np.float32).tobytes()
+        for i in range(0, len(audio_bytes), CHUNK_SIZE * 4):  # 4 bytes per float32
+            stream.write(audio_bytes[i:i + CHUNK_SIZE * 4])
+    except KeyboardInterrupt:
+        print("\nPlayback interrupted.")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
 
 def main():
@@ -184,17 +208,7 @@ Examples:
     else:
         print("Playing reconstructed audio...")
         try:
-            p = pyaudio.PyAudio()
-            stream = p.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=SAMPLE_RATE,
-                output=True
-            )
-            stream.write(reconstructed_audio.tobytes())
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
+            play_audio(reconstructed_audio, SAMPLE_RATE)
             print("Playback complete!")
         except Exception as e:
             print(f"Error during playback: {e}")
