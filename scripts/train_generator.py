@@ -14,7 +14,6 @@ import time
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import mixed_precision
 
 from vqwave.encoder import Encoder, CodebookManager
 from vqwave.generator import create_generator
@@ -133,18 +132,12 @@ def main():
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
                        help='Initial learning rate (default: 1e-3)')
-    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.9,
-                       help='Learning rate decay rate (default: 0.8)')
+    parser.add_argument('--decay-rate', '--half-life', type=float, default=0.85,
+                       help='Learning rate decay rate (default: 0.85)')
     parser.add_argument('--decay-steps', type=int, default=None,
                        help='Number of steps for each decay (default: epoch_steps)')
-    parser.add_argument('--fp16', action='store_true', default=False,
-                       help='Use mixed precision training (default: False)')
     
     args = parser.parse_args()
-    
-    # Set mixed precision policy
-    if args.fp16:
-        tf.keras.mixed_precision.set_global_policy('mixed_float16')
     
     # Get generator config
     if args.generator not in GENERATOR_CONFIGS:
@@ -265,8 +258,6 @@ def main():
     
     opt = tf.keras.optimizers.Adam(lr, clipnorm=1.0)
     opt.iterations.assign(start_step)
-    if args.fp16:
-        opt = tf.keras.mixed_precision.LossScaleOptimizer(opt, dynamic_growth_steps=512)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -291,11 +282,8 @@ def main():
             
             etime = int(args.epoch_steps * ((time.time() - start_time) / (step + 1)))
             etime = '%02d:%02d:%02d' % (etime // 3600, (etime // 60) % 60, etime % 60)
-            # Get learning rate - handle both schedule and wrapped optimizer
-            if hasattr(opt, 'inner_optimizer'):
-                lr_value = opt.inner_optimizer.learning_rate
-            else:
-                lr_value = opt.learning_rate
+            # Get learning rate
+            lr_value = opt.learning_rate
             if callable(lr_value):
                 current_lr = float(lr_value(opt.iterations))
             else:

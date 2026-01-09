@@ -22,7 +22,7 @@ DEFAULT_TEMPERATURE = 0.9
 DEFAULT_TOP_K = 32
 DEFAULT_TOP_P = 0.9
 DEFAULT_DYNAMIC_TEMPERATURE = False
-DEFAULT_ENTROPY_RATIO = 0.65  # 65% of max entropy
+DEFAULT_ENTROPY_RATIO = 0.7  # 70% of max entropy
 DEFAULT_TEMP_BETA = 0.95  # EMA smoothing factor for dynamic temperature
 DEFAULT_TEMP_K = 0.05  # Gain for dynamic temperature updates
 DEFAULT_TEMP_MIN = 0.7  # Minimum temperature clamp
@@ -122,6 +122,71 @@ def _entropy_from_logits(logits):
     return -tf.reduce_sum(probs * log_probs)
 
 
+@tf.function
+def _codes_to_base64_string(codes):
+    """
+    Convert a tensor of codes to a base64-encoded string.
+    For codes < 4096, uses 2-character base64 encoding.
+    """
+    # Base64 character lookup
+    base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    chars_tensor = tf.constant(list(base64_chars), dtype=tf.string)
+    
+    # Convert codes to 2-character base64 (for codes < 4096)
+    # char1 = (code >> 6) & 63, char2 = code & 63
+    codes_clamped = tf.minimum(codes, 4095)  # Clamp to 4095 for 2-char encoding
+    char1_indices = tf.bitwise.bitwise_and(tf.bitwise.right_shift(codes_clamped, 6), 63)
+    char2_indices = tf.bitwise.bitwise_and(codes_clamped, 63)
+    
+    # Lookup characters
+    char1 = tf.gather(chars_tensor, char1_indices)
+    char2 = tf.gather(chars_tensor, char2_indices)
+    
+    # Concatenate pairs and join into a single string
+    char_pairs = tf.strings.join([char1, char2], separator='')
+    return tf.strings.reduce_join(char_pairs, separator='')
+
+
+@tf.function
+def _update_dynamic_temperature(logits, T, e_ema, target_entropy, temp_beta, temp_k, temp_min, temp_max):
+    """
+    Update temperature using dynamic temperature control (entropy-based feedback).
+    
+    This implements a feedback controller to maintain target entropy and prevent repetitive sequences.
+    Algorithm:
+        1. Compute current entropy H of the predicted distribution (using current temperature T)
+        2. Calculate error signal: e = target_entropy - H
+           - If H < target (too repetitive): e > 0 → increase temperature
+           - If H > target (too random): e < 0 → decrease temperature
+        3. Smooth error with EMA: e_ema = β * e_ema + (1-β) * e
+           - Prevents oscillation by averaging recent errors
+        4. Multiplicative update: T = T * exp(k * e_ema)
+           - exp(k * e_ema) > 1 when e_ema > 0 (increase T)
+           - exp(k * e_ema) < 1 when e_ema < 0 (decrease T)
+           - k controls sensitivity (larger k = faster response)
+        5. Clamp to bounds: T ∈ [temp_min, temp_max]
+    
+    Args:
+        logits: Model logits [num_codes]
+        T: Current temperature
+        e_ema: Current EMA of error signal
+        target_entropy: Target entropy value
+        temp_beta: EMA smoothing factor
+        temp_k: Gain for temperature updates
+        temp_min: Minimum temperature bound
+        temp_max: Maximum temperature bound
+    
+    Returns:
+        Updated temperature T and error EMA e_ema
+    """
+    H = _entropy_from_logits(logits / T)
+    e = target_entropy - H
+    e_ema = temp_beta * e_ema + (1.0 - temp_beta) * e
+    T = T * tf.exp(temp_k * e_ema)
+    T = tf.clip_by_value(T, temp_min, temp_max)
+    return T, e_ema
+
+
 def _make_generate_loop(generator, has_context, sampling_mode, temperature, top_k, top_p,
                         dynamic_temp=DEFAULT_DYNAMIC_TEMPERATURE, target_entropy=None,
                         temp_beta=DEFAULT_TEMP_BETA, temp_k=DEFAULT_TEMP_K,
@@ -134,8 +199,8 @@ def _make_generate_loop(generator, has_context, sampling_mode, temperature, top_
     """
     
     @tf.function
-    def generate_loop_unconditional(initial_code, num_codes):
-        """Fast generation loop without context."""
+    def generate_loop(initial_code, num_codes, context_sequence=None):
+        """Fast generation loop with optional context."""
         codes = tf.TensorArray(dtype=tf.int32, size=num_codes, dynamic_size=False)
         codes = codes.write(0, initial_code)
         current_code = initial_code
@@ -144,33 +209,30 @@ def _make_generate_loop(generator, has_context, sampling_mode, temperature, top_
         T = temperature
         e_ema = tf.constant(0.0, dtype=tf.float32)
         
+        # Code printing: accumulate codes and print in batches of 80
+        LINE_LENGTH = 80
+        line_buffer = tf.TensorArray(dtype=tf.int32, size=LINE_LENGTH, dynamic_size=False)
+        
         for i in tf.range(1, num_codes):
             input_code = tf.reshape(current_code, [1, 1])
-            logits = generator(input_code, training=False)
+            
+            if has_context:
+                # Get context for current position
+                context_len = tf.shape(context_sequence)[0]
+                context_pos = tf.minimum(i - 1, context_len - 1)
+                context_step = context_sequence[context_pos:context_pos+1]  # [1, context_dim]
+                context_step = tf.expand_dims(context_step, 0)  # [1, 1, context_dim]
+                logits = generator([input_code, context_step], training=False)
+            else:
+                logits = generator(input_code, training=False)
+            
             logits = logits[0, 0]  # [num_codes]
             
             # Update dynamic temperature if enabled
-            # This implements a feedback controller to maintain target entropy and prevent repetitive sequences.
-            # Algorithm:
-            #   1. Compute current entropy H of the predicted distribution (using current temperature T)
-            #   2. Calculate error signal: e = target_entropy - H
-            #      - If H < target (too repetitive): e > 0 → increase temperature
-            #      - If H > target (too random): e < 0 → decrease temperature
-            #   3. Smooth error with EMA: e_ema = β * e_ema + (1-β) * e
-            #      - Prevents oscillation by averaging recent errors
-            #   4. Multiplicative update: T = T * exp(k * e_ema)
-            #      - exp(k * e_ema) > 1 when e_ema > 0 (increase T)
-            #      - exp(k * e_ema) < 1 when e_ema < 0 (decrease T)
-            #      - k controls sensitivity (larger k = faster response)
-            #   5. Clamp to bounds: T ∈ [temp_min, temp_max]
             if dynamic_temp:
-                H = _entropy_from_logits(logits / T)
-                e = target_entropy - H
-                e_ema = temp_beta * e_ema + (1.0 - temp_beta) * e
-                T = T * tf.exp(temp_k * e_ema)
-                T = tf.clip_by_value(T, temp_min, temp_max)
-                # Print temperature every step (tf.print returns first tensor, so make T first)
-                #tf.print("\nStep", i, "T=", T, "H=", H, "target=", target_entropy)
+                T, e_ema = _update_dynamic_temperature(
+                    logits, T, e_ema, target_entropy, temp_beta, temp_k, temp_min, temp_max
+                )
             
             # Sample based on mode
             if sampling_mode == 'top_p':
@@ -183,75 +245,29 @@ def _make_generate_loop(generator, has_context, sampling_mode, temperature, top_
                 next_code = sample_greedy(logits)
             
             codes = codes.write(i, next_code)
+            
+            # Print codes in batches: use circular buffer, print every LINE_LENGTH codes
+            buffer_pos = i % LINE_LENGTH
+            line_buffer = line_buffer.write(buffer_pos, next_code)
+            # Print when buffer wraps around (i is multiple of LINE_LENGTH and i > 0)
+            should_print = tf.logical_and(tf.equal(buffer_pos, 0), tf.greater(i, 0))
+            if should_print:
+                line_codes = line_buffer.gather(tf.range(LINE_LENGTH))
+                line_str = _codes_to_base64_string(line_codes)
+                tf.print(line_str)
+            
             current_code = next_code
+        
+        # Print remaining codes in buffer (if any)
+        remaining_count = num_codes % LINE_LENGTH
+        if remaining_count > 0:
+            remaining_codes = line_buffer.gather(tf.range(remaining_count))
+            remaining_str = _codes_to_base64_string(remaining_codes)
+            tf.print(remaining_str)
         
         return codes.stack()
     
-    @tf.function
-    def generate_loop_with_context(initial_code, num_codes, context_sequence):
-        """Fast generation loop with context."""
-        codes = tf.TensorArray(dtype=tf.int32, size=num_codes, dynamic_size=False)
-        codes = codes.write(0, initial_code)
-        current_code = initial_code
-        context_len = tf.shape(context_sequence)[0]
-        
-        # Dynamic temperature state
-        T = temperature
-        e_ema = tf.constant(0.0, dtype=tf.float32)
-        
-        for i in tf.range(1, num_codes):
-            input_code = tf.reshape(current_code, [1, 1])
-            
-            # Get context for current position
-            context_pos = tf.minimum(i - 1, context_len - 1)
-            context_step = context_sequence[context_pos:context_pos+1]  # [1, context_dim]
-            context_step = tf.expand_dims(context_step, 0)  # [1, 1, context_dim]
-            
-            logits = generator([input_code, context_step], training=False)
-            logits = logits[0, 0]  # [num_codes]
-            
-            # Update dynamic temperature if enabled
-            # This implements a feedback controller to maintain target entropy and prevent repetitive sequences.
-            # Algorithm:
-            #   1. Compute current entropy H of the predicted distribution (using current temperature T)
-            #   2. Calculate error signal: e = target_entropy - H
-            #      - If H < target (too repetitive): e > 0 → increase temperature
-            #      - If H > target (too random): e < 0 → decrease temperature
-            #   3. Smooth error with EMA: e_ema = β * e_ema + (1-β) * e
-            #      - Prevents oscillation by averaging recent errors
-            #   4. Multiplicative update: T = T * exp(k * e_ema)
-            #      - exp(k * e_ema) > 1 when e_ema > 0 (increase T)
-            #      - exp(k * e_ema) < 1 when e_ema < 0 (decrease T)
-            #      - k controls sensitivity (larger k = faster response)
-            #   5. Clamp to bounds: T ∈ [temp_min, temp_max]
-            if dynamic_temp:
-                H = _entropy_from_logits(logits / T)
-                e = target_entropy - H
-                e_ema = temp_beta * e_ema + (1.0 - temp_beta) * e
-                T = T * tf.exp(temp_k * e_ema)
-                T = tf.clip_by_value(T, temp_min, temp_max)
-                # Print temperature every step (tf.print returns first tensor, so make T first)
-                #tf.print("\nStep", i, "T=", T, "H=", H, "target=", target_entropy)
-            
-            # Sample based on mode
-            if sampling_mode == 'top_p':
-                next_code = sample_top_p(logits, top_p, T)
-            elif sampling_mode == 'top_k':
-                next_code = sample_top_k(logits, top_k, T)
-            elif sampling_mode == 'temperature':
-                next_code = sample_temperature(logits, T)
-            else:
-                next_code = sample_greedy(logits)
-            
-            codes = codes.write(i, next_code)
-            current_code = next_code
-        
-        return codes.stack()
-    
-    if has_context:
-        return generate_loop_with_context
-    else:
-        return generate_loop_unconditional
+    return generate_loop
 
 
 def generate_codes(generator, context_model, num_codes, source_codes, 
@@ -343,20 +359,11 @@ def generate_codes(generator, context_model, num_codes, source_codes,
     
     # Run generation
     num_codes_tensor = tf.constant(num_codes, dtype=tf.int32)
-    if has_context:
-        codes = generate_fn(initial_code, num_codes_tensor, context_sequence)
-    else:
-        codes = generate_fn(initial_code, num_codes_tensor)
+    codes = generate_fn(initial_code, num_codes_tensor, context_sequence if has_context else None)
     
     codes = codes.numpy()
     
-    # Print codes if requested (after generation for speed)
-    if show_codes:
-        for i, code in enumerate(codes):
-            print(code_to_ascii(int(code)), end='', flush=True)
-            if (i + 1) % 80 == 0:
-                print()
-        print()  # Final newline
+    # Codes are already printed during generation (one line at a time)
     
     return codes
 

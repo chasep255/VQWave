@@ -81,15 +81,22 @@ class AudioDataset:
             self.total_samples += self.data[-1][0].shape[0]
             
     def random_sample(self, length):
-        if not self._shuffle_buf:
-            self._shuffle_buf = list(self.data)
-            random.shuffle(self._shuffle_buf)
-    
-        x, m = self._shuffle_buf.pop()
-        s = int(self._trim_start * x.shape[0])
-        e = x.shape[0] - length - int(x.shape[0] * self._trim_end)
-        i = random.randint(s, e)
-        return u16_to_f32(x[i : i + length]), m
+        # Keep trying until we find a song long enough
+        while True:
+            if not self._shuffle_buf:
+                self._shuffle_buf = list(self.data)
+                random.shuffle(self._shuffle_buf)
+        
+            x, m = self._shuffle_buf.pop()
+            s = int(self._trim_start * x.shape[0])
+            e = x.shape[0] - length - int(x.shape[0] * self._trim_end)
+            
+            # Skip songs that are too short for the requested length
+            if e < s:
+                continue
+            
+            i = random.randint(s, e)
+            return u16_to_f32(x[i : i + length]), m
     
     def random_batch(self, batch_size, sample_length):
         x, m = zip(*[self.random_sample(sample_length) for i in range(batch_size)])
