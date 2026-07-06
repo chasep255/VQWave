@@ -92,32 +92,31 @@ ENCODER_CONFIGS = {
 # Fully convolutional -- no attention or positional embeddings -- so it runs on
 # arbitrary-length audio (any multiple of compression_rate). A WaveDiffuse-style
 # U-Net contracts then expands:
-#   - `stages`: one entry per resolution level. Each level is TWO convs -- a
-#     strided down/up conv (`downsample_kernel`) plus a stride-1 refine conv
-#     (`kernel`) -- and contributes ONE skip connection. The product of the stage
-#     strides must equal the destination VQ-VAE's compression_rate.
+#   - `stages`: one entry per resolution level, each with two per-stage kernels --
+#     `resample_kernel` (the strided down/up conv) and `conv_kernel` (the stride-1
+#     refine / skip-fuse conv). Each level is TWO convs and contributes ONE skip
+#     connection. The product of the stage strides must equal the destination
+#     VQ-VAE's compression_rate.
 #   - `middle`: at the bottleneck (the code rate) the integer codes are embedded
-#     (a learned table of width `cond_dim`) and concatenated, then a stack of
-#     dilated convs widens the receptive field. No attention.
-# Every conv is FiLM-conditioned on the diffusion time. Upsampling is linear
-# resize + conv (`upsample_mode: "resize"`, no checkerboard) or transposed conv
-# (`"transpose"`). A final 1-channel projection to the (v / eps) prediction is
-# appended automatically.
+#     (a learned table of width `cond_dim`) and concatenated, projected to the
+#     middle width, then a stack of pre-activated residual dilated blocks widens
+#     the receptive field. No attention. (All middle blocks share a channel width.)
+# Every conv is FiLM-conditioned on the diffusion time. Upsampling is a transposed
+# conv (keep resample_kernel divisible by stride to avoid checkerboard). A final
+# 1-channel projection to the (v / eps) prediction is appended automatically.
 DIFFUSION_CONFIGS = {
     "diffusion_256": {
         "dest_vqvae": "vqvae_256",         # renders codes for 256x compression
         "cond_dim": 32,                    # code-id embedding width
         "time_dim": 256,                   # diffusion-time embedding width
         "prediction": "v",                 # "v" (recommended) or "eps"
-        "kernel": 9,                       # stride-1 refine / skip-fuse conv kernel
-        "downsample_kernel": 8,            # strided down/up conv kernel (divisible by stride)
-        "upsample_mode": "resize",         # "resize" (linear, no checkerboard) or "transpose"
-        # Contract/expand levels; product of strides == 256. Two convs + one skip each.
+        # Contract/expand levels; product of strides == 256. Two convs + one skip
+        # each: resample_kernel (strided down/up) and conv_kernel (stride-1 refine).
         "stages": [
-            {"channels": 64, "stride": 4},
-            {"channels": 128, "stride": 4},
-            {"channels": 256, "stride": 4},
-            {"channels": 512, "stride": 4},
+            {"channels": 64,  "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
+            {"channels": 128, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
+            {"channels": 256, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
+            {"channels": 512, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
         ],
         # Bottleneck (code rate): codes injected here, then dilated convs.
         "middle": [
@@ -132,26 +131,27 @@ DIFFUSION_CONFIGS = {
         "cond_dim": 32,
         "time_dim": 32,
         "prediction": "v",
-        "kernel": 9,
-        "downsample_kernel": 8,
-        "upsample_mode": "resize",
-        # Contract/expand levels; product of strides == 512. Two convs + one skip each.
+        # Contract/expand levels; product of strides == 512. Two convs + one skip
+        # each: resample_kernel (strided down/up) and conv_kernel (stride-1 refine).
         "stages": [
-            {"channels": 32, "stride": 2},
-            {"channels": 64, "stride": 4},
-            {"channels": 128, "stride": 4},
-            {"channels": 256, "stride": 4},
-            {"channels": 512, "stride": 4},
+            {"channels": 32,  "stride": 2, "resample_kernel": 6,  "conv_kernel": 9},
+            {"channels": 64,  "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
+            {"channels": 128, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
+            {"channels": 256, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
+            {"channels": 512, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
         ],
         "middle": [
-            {"channels": 1024, "kernel": 3, "dilation": 1},
-            {"channels": 1024, "kernel": 3, "dilation": 2},
-            {"channels": 1024, "kernel": 3, "dilation": 4},
-            {"channels": 1024, "kernel": 3, "dilation": 8},
-            {"channels": 1024, "kernel": 3, "dilation": 1},
-            {"channels": 1024, "kernel": 3, "dilation": 2},
-            {"channels": 1024, "kernel": 3, "dilation": 4},
-            {"channels": 1024, "kernel": 3, "dilation": 8},
+            {"channels": 512, "kernel": 3, "dilation": 1},
+            {"channels": 512, "kernel": 3, "dilation": 2},
+            {"channels": 512, "kernel": 3, "dilation": 4},
+            {"channels": 512, "kernel": 3, "dilation": 8},
+            {"channels": 512, "kernel": 3, "dilation": 16},
+            {"channels": 512, "kernel": 3, "dilation": 1},
+            {"channels": 512, "kernel": 3, "dilation": 2},
+            {"channels": 512, "kernel": 3, "dilation": 4},
+            {"channels": 512, "kernel": 3, "dilation": 8},
+            {"channels": 512, "kernel": 3, "dilation": 16},
+
         ],
     },
 }

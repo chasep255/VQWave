@@ -10,7 +10,8 @@ Architecture (WaveDiffuse-style U-Net; see DIFFUSION_CONFIGS in config.py):
   - Contracting `stages` downsample the noisy waveform to the code rate. Each
     level is two convs (strided down + stride-1 refine) and yields one skip.
   - At the `middle` (code rate) the integer codes are embedded (a learned table)
-    and concatenated, then a dilated conv stack widens the receptive field.
+    and concatenated, then a stack of pre-activated residual dilated blocks
+    widens the receptive field.
   - Expanding stages mirror the contracting path: concat the level's skip, fuse,
     then upsample (linear resize + conv, or transposed conv).
   - Every conv is FiLM-conditioned on the diffusion time (AdaptiveShiftScale).
@@ -32,7 +33,6 @@ from tensorflow.keras import layers, Input
 
 from vqwave.config import DIFFUSION_CONFIGS, ENCODER_CONFIGS
 from vqwave.audio import mu_law, mu_law_inverse
-from vqwave.layers import Resize1D
 
 
 # --- Normalization: map the raw waveform marginal closer to a Gaussian so it
@@ -123,6 +123,29 @@ def _film_conv(x, t, channels, kernel, stride=1, activation='elu',
     return x
 
 
+def _res_block(x, t, channels, kernel, dilation):
+    """Pre-activated residual block with two convs:
+
+        h = Conv_dilated(ELU(FiLM(x, t)))    # mix over time (kernel, dilation)
+        h = Conv_1x1(ELU(FiLM(h, t)))        # reproject over channels (dense in time)
+        return x + h
+
+    Pre-activation (He et al. 2016) keeps the residual stream un-activated, which
+    trains better through a deep stack; FiLM injects the diffusion time before
+    each conv. The identity add requires matching channels (guaranteed by the
+    middle input projection); otherwise the block is a plain projection."""
+    h = AdaptiveShiftScale()(x, t)
+    h = layers.Activation('elu')(h)
+    h = layers.Conv1D(channels, kernel, dilation_rate=dilation,
+                      padding='same', use_bias=False)(h)          # dilated conv over time
+    h = AdaptiveShiftScale()(h, t)
+    h = layers.Activation('elu')(h)
+    h = layers.Conv1D(channels, 1, padding='same', use_bias=False)(h)  # 1x1 reproject
+    if x.shape[-1] == channels:
+        return layers.Add()((x, h))
+    return h
+
+
 class Denoiser(keras.Model):
     """Conditional convolutional waveform denoiser for the diffusion decoder.
 
@@ -141,9 +164,6 @@ class Denoiser(keras.Model):
 
         stages = config["stages"]
         middle = config["middle"]
-        kernel = config["kernel"]
-        ds_kernel = config["downsample_kernel"]
-        upsample_mode = config["upsample_mode"]
 
         # The contracting stages must downsample by exactly compression_rate.
         down = 1
@@ -168,27 +188,26 @@ class Denoiser(keras.Model):
         x = layers.Reshape((-1, 1))(input_audio)
         skips = []
         for s in stages:
-            x = _film_conv(x, t, s["channels"], ds_kernel, stride=s["stride"])  # downsample
-            x = _film_conv(x, t, s["channels"], kernel)                          # refine
+            x = _film_conv(x, t, s["channels"], s["resample_kernel"], stride=s["stride"])  # downsample
+            x = _film_conv(x, t, s["channels"], s["conv_kernel"])                           # refine
             skips.append(x)
 
-        # --- Middle (code rate): inject codes, then a dilated conv stack. ---
+        # --- Middle (code rate): inject codes, project into the residual stream,
+        # then a stack of pre-activated residual dilated blocks. ---
         x = layers.Concatenate(axis=-1, name='code_concat')((x, zc))
+        x = _film_conv(x, t, middle[0]["channels"], 1, activation=None)  # project to residual width
         for m in middle:
-            x = _film_conv(x, t, m["channels"], m["kernel"], dilation=m.get("dilation", 1))
+            x = _res_block(x, t, m["channels"], m["kernel"], m.get("dilation", 1))
+        x = layers.Activation('elu')(x)  # final activation out of the residual stream
 
         # --- Expanding path: mirror of the contracting path. Concat the level's
-        # skip, fuse, then upsample (resize+conv or transposed conv). ---
+        # skip, fuse, then upsample with a transposed conv. ---
         for i in reversed(range(len(stages))):
             s = stages[i]
             x = layers.Concatenate(axis=-1)((x, skips[i]))
-            x = _film_conv(x, t, s["channels"], kernel)                          # fuse skip
+            x = _film_conv(x, t, s["channels"], s["conv_kernel"])                # fuse skip
             out_c = stages[i - 1]["channels"] if i > 0 else s["channels"]
-            if upsample_mode == "resize":
-                x = Resize1D(s["stride"], "bilinear")(x)
-                x = _film_conv(x, t, out_c, kernel)                              # upsample refine
-            else:
-                x = _film_conv(x, t, out_c, ds_kernel, stride=s["stride"], transpose=True)
+            x = _film_conv(x, t, out_c, s["resample_kernel"], stride=s["stride"], transpose=True)
 
         # Final projection to a single-channel prediction (linear, float32).
         x = layers.Conv1D(1, 1, dtype='float32', name='output_proj')(x)
