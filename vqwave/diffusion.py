@@ -6,11 +6,13 @@ high-fidelity "rendering" decoder -- the deterministic Decoder in encoder.py is
 only the "training" decoder that shapes the codebook. This model learns
 p(audio | z_q) and is used at generation time.
 
-Architecture (see DIFFUSION_CONFIGS in config.py):
-  - `encoder_layers` downsample the noisy waveform by exactly compression_rate to
-    the code rate. The integer codes are embedded (a learned table) and the
-    embeddings concatenated at that point; the trailing stride-1 encoder layers refine.
-  - `decoder_layers` (transpose convs) expand back to the waveform.
+Architecture (WaveDiffuse-style U-Net; see DIFFUSION_CONFIGS in config.py):
+  - Contracting `stages` downsample the noisy waveform to the code rate. Each
+    level is two convs (strided down + stride-1 refine) and yields one skip.
+  - At the `middle` (code rate) the integer codes are embedded (a learned table)
+    and concatenated, then a dilated conv stack widens the receptive field.
+  - Expanding stages mirror the contracting path: concat the level's skip, fuse,
+    then upsample (linear resize + conv, or transposed conv).
   - Every conv is FiLM-conditioned on the diffusion time (AdaptiveShiftScale).
   - A final 1-channel float32 projection produces the (v / eps) prediction.
 
@@ -30,6 +32,7 @@ from tensorflow.keras import layers, Input
 
 from vqwave.config import DIFFUSION_CONFIGS, ENCODER_CONFIGS
 from vqwave.audio import mu_law, mu_law_inverse
+from vqwave.layers import Resize1D
 
 
 # --- Normalization: map the raw waveform marginal closer to a Gaussian so it
@@ -105,10 +108,15 @@ class TimeEmbedding(layers.Layer):
         return self.dense2(self.dense1(emb))                  # (B, dim)
 
 
-def _film_conv(x, t, channels, kernel, stride, activation, transpose=False):
-    """One time-FiLM-conditioned conv (straight, strided, or transposed)."""
-    Conv = layers.Conv1DTranspose if transpose else layers.Conv1D
-    x = Conv(channels, kernel, strides=stride, padding='same', use_bias=False)(x)
+def _film_conv(x, t, channels, kernel, stride=1, activation='elu',
+               transpose=False, dilation=1):
+    """One time-FiLM-conditioned conv (straight, strided, dilated, or transposed)."""
+    if transpose:
+        x = layers.Conv1DTranspose(channels, kernel, strides=stride,
+                                   padding='same', use_bias=False)(x)
+    else:
+        x = layers.Conv1D(channels, kernel, strides=stride, dilation_rate=dilation,
+                          padding='same', use_bias=False)(x)
     x = AdaptiveShiftScale()(x, t)
     if activation:
         x = layers.Activation(activation)(x)
@@ -131,24 +139,19 @@ class Denoiser(keras.Model):
         compression = vqvae["compression_rate"]
         num_codes = vqvae["num_codes"]
 
-        enc_layers = config["encoder_layers"]
-        dec_layers = config["decoder_layers"]
+        stages = config["stages"]
+        middle = config["middle"]
+        kernel = config["kernel"]
+        ds_kernel = config["downsample_kernel"]
+        upsample_mode = config["upsample_mode"]
 
-        # The encoder must downsample by exactly compression_rate, and the decoder
-        # (transpose convs) must expand back by the same factor.
+        # The contracting stages must downsample by exactly compression_rate.
         down = 1
-        for l in enc_layers:
-            down *= l.get("stride", 1)
+        for s in stages:
+            down *= s["stride"]
         assert down == compression, (
-            "encoder_layers downsample by %d but dest VQ-VAE compresses by %d"
+            "stage strides multiply to %d but dest VQ-VAE compresses by %d"
             % (down, compression))
-        up = 1
-        for l in dec_layers:
-            if l.get("transpose", False):
-                up *= l.get("stride", 1)
-        assert up == compression, (
-            "decoder_layers expand by %d but dest VQ-VAE compresses by %d"
-            % (up, compression))
 
         if 'name' not in kwargs:
             kwargs['name'] = config["dest_vqvae"].replace("vqvae", "diffusion")
@@ -160,38 +163,32 @@ class Denoiser(keras.Model):
         t = TimeEmbedding(config["time_dim"])(input_time)
         zc = layers.Embedding(num_codes, config["cond_dim"], name='code_embedding')(input_codes)
 
-        # --- Encoder: downsample to the code rate, concat codes, then refine ---
-        # A skip is kept at each resolution (last layer at that resolution wins) so
-        # the decoder can recover the high-frequency detail of the noisy input --
-        # without skips it would all have to squeeze through the bottleneck.
+        # --- Contracting path: two convs per level (strided down + refine), one
+        # skip per level. Skips let the decoder recover high-frequency detail. ---
         x = layers.Reshape((-1, 1))(input_audio)
-        skips = {}
-        cum = 1
-        injected = False
-        for l in enc_layers:
-            stride = l.get("stride", 1)
-            x = _film_conv(x, t, l["channels"], l["kernel"], stride,
-                           l.get("activation", "elu"))
-            cum *= stride
-            if not injected and cum == compression:
-                # At the code rate: fuse the code embeddings.
-                x = layers.Concatenate(axis=-1, name='code_concat')((x, zc))
-                injected = True
-            skips[cum] = x
-        assert injected, "encoder never reached the code rate to inject codes"
+        skips = []
+        for s in stages:
+            x = _film_conv(x, t, s["channels"], ds_kernel, stride=s["stride"])  # downsample
+            x = _film_conv(x, t, s["channels"], kernel)                          # refine
+            skips.append(x)
 
-        # --- Decoder: expand back to the waveform, concatenating encoder skips at
-        # matching resolutions right before each upsample. ---
-        cum = compression
-        for l in dec_layers:
-            transpose = l.get("transpose", False)
-            stride = l.get("stride", 1)
-            if transpose and cum != compression and cum in skips:
-                x = layers.Concatenate(axis=-1)((x, skips[cum]))
-            x = _film_conv(x, t, l["channels"], l["kernel"], stride,
-                           l.get("activation", "elu"), transpose=transpose)
-            if transpose:
-                cum //= stride
+        # --- Middle (code rate): inject codes, then a dilated conv stack. ---
+        x = layers.Concatenate(axis=-1, name='code_concat')((x, zc))
+        for m in middle:
+            x = _film_conv(x, t, m["channels"], m["kernel"], dilation=m.get("dilation", 1))
+
+        # --- Expanding path: mirror of the contracting path. Concat the level's
+        # skip, fuse, then upsample (resize+conv or transposed conv). ---
+        for i in reversed(range(len(stages))):
+            s = stages[i]
+            x = layers.Concatenate(axis=-1)((x, skips[i]))
+            x = _film_conv(x, t, s["channels"], kernel)                          # fuse skip
+            out_c = stages[i - 1]["channels"] if i > 0 else s["channels"]
+            if upsample_mode == "resize":
+                x = Resize1D(s["stride"], "bilinear")(x)
+                x = _film_conv(x, t, out_c, kernel)                              # upsample refine
+            else:
+                x = _film_conv(x, t, out_c, ds_kernel, stride=s["stride"], transpose=True)
 
         # Final projection to a single-channel prediction (linear, float32).
         x = layers.Conv1D(1, 1, dtype='float32', name='output_proj')(x)
