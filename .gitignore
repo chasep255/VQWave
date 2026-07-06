@@ -45,11 +45,9 @@ pyrightconfig.json
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Model files and checkpoints
+# Model files and checkpoints (weights are not tracked in git)
 old/
 *.h5
-# Allow .h5 files in weights/ (trained model weights)
-!weights/**/*.h5
 *.ckpt
 *.pb
 *.pkl
