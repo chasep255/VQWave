@@ -1,73 +1,73 @@
 # VQWave
 
-A hierarchical Vector Quantized Variational Autoencoder (VQ-VAE) system for music generation. VQWave uses multi-level compression and autoregressive LSTM generators to create audio samples.
+A Vector Quantized Variational Autoencoder (VQ-VAE) system for music generation.
+VQWave compresses audio 256×/512× into a sequence of discrete codes, learns an
+autoregressive generator over those codes to synthesize new sequences, and renders
+them back to audio with a conditional diffusion decoder.
 
 > **Note**: This project is under active development and may be incomplete. Some features and documentation are still being refined.
 
 ## Features
 
-- **Hierarchical Compression**: Four compression levels (512x, 128x, 32x, 8x) for multi-scale audio representation
-- **Autoregressive Generation**: LSTM-based generators that predict code sequences
-- **Context Conditioning**: Higher-resolution generators are conditioned on lower-resolution codes
-- **Efficient Training**: Memory-mapped audio data for handling large datasets
-- **Flexible Sampling**: Temperature, top-k, and greedy sampling methods
+- **256× / 512× Compression**: A VQ-VAE encodes audio into discrete codes. Two presets are provided (`vqvae_256`, `vqvae_512`).
+- **Reconstruction Training**: The VQ-VAE is trained with a spectral reconstruction loss (STFT/mel/MSE) plus a VQ commitment loss.
+- **Diffusion Rendering Decoder**: A separate, fully convolutional denoising-diffusion model renders a high-fidelity waveform from the codes at generation time (v-prediction, DDIM sampling). Length-agnostic — no attention or positional embeddings.
+- **Autoregressive Generation**: A single unconditional generator predicts the code sequence. Two interchangeable architectures are provided (causal Transformer or causal-conv/RNN stack).
+- **Efficient Training**: Background-threaded random-crop audio loading for large datasets.
+- **Flexible Sampling**: Temperature, top-k, top-p, and greedy sampling.
 
 ## Architecture
 
-VQWave uses a hierarchical approach to audio generation:
+VQWave has three trained components: a **VQ-VAE** (encoder + codebook + a
+deterministic decoder), an autoregressive **generator** over the codes, and a
+**diffusion decoder** that renders audio from the codes.
 
-**Training (Encoding):**
+**Training the VQ-VAE (reconstruction):**
 ```
-Audio → VQ-VAE Encoders → Quantized Codes
-        (512x, 128x, 32x, 8x compression levels)
+Audio → Encoder → Codebook (quantize) → Decoder → Reconstructed audio
+                                                        │
+        Reconstruction loss (STFT/mel/MSE) + VQ commitment loss
 ```
+The deterministic decoder is the "training" decoder: its only job is to shape the
+codebook. Final audio is rendered by the diffusion decoder.
 
-**Generation (Decoding):**
+**Training the diffusion decoder (codes → waveform):**
 ```
-Step 1: Generator_512 (unconditional)
-        ↓
-    512x codes
-        ↓
-Step 2: Generator_128 (conditioned on 512x codes)
-        ↓
-    128x codes
-        ↓
-Step 3: Generator_32 (conditioned on 128x codes)
-        ↓
-    32x codes
-        ↓
-Step 4: Generator_8 (conditioned on 32x codes)
-        ↓
-    8x codes
-        ↓
-    VQ-VAE Decoder
-        ↓
-    Audio Output
+Audio → (frozen) Encoder + Codebook → integer codes ─┐
+                                                      ▼
+        noisy waveform  →  conditional U-Net denoiser  →  v-prediction
+                          (codes injected at the code rate; time via FiLM)
 ```
 
-Each generator produces codes at its compression level, which are then used as context for the next level. The final 8x codes are decoded to produce the audio waveform.
+**Generation:**
+```
+Generator (unconditional, autoregressive)
+        ↓
+   integer codes
+        ↓
+   Diffusion decoder (DDIM sampling)   ← or the deterministic VQ-VAE decoder
+        ↓
+   Audio Output
+```
 
-### Compression Levels
+### Components
 
-1. **512x compression** (`vqvae_512`): Coarsest representation, unconditional generation
-2. **128x compression** (`vqvae_128`): Conditioned on 512x codes
-3. **32x compression** (`vqvae_32`): Conditioned on 128x codes  
-4. **8x compression** (`vqvae_8`): Finest representation, conditioned on 32x codes
+The VQ-VAE (`vqvae_256` / `vqvae_512`) uses:
+- **Encoder**: Convolutional layers that compress audio 256×/512× to latent vectors.
+- **Codebook**: Vector quantization with 2048 code vectors (32-dim each).
+- **Decoder**: Transposed convolutions that reconstruct audio from quantized codes (training decoder).
 
-Each level uses:
-- **Encoder**: Convolutional layers that compress audio to latent codes
-- **Codebook**: Vector quantization with 1024 code vectors (32-dim each)
-- **Decoder**: Transposed convolutions that reconstruct audio from quantized codes
-- **Generator**: Configurable LSTM layers (default: 2 layers, 512 units each) that predict next code autoregressively
+The **diffusion decoder** (`diffusion_256` / `diffusion_512`) is a fully
+convolutional U-Net denoiser conditioned on the integer codes (embedded and
+concatenated at the code rate) and on the diffusion timestep (FiLM). It uses a
+continuous-time cosine schedule with v-prediction and deterministic DDIM
+sampling. Being fully convolutional, it runs on any audio length that is a
+multiple of the compression rate.
 
-### Generation Process
-
-Generation proceeds hierarchically:
-1. Generate 512x codes unconditionally
-2. Generate 128x codes conditioned on 512x codes
-3. Generate 32x codes conditioned on 128x codes
-4. Generate 8x codes conditioned on 32x codes
-5. Decode 8x codes to final audio waveform
+The generator predicts the next code autoregressively. Two configs target the
+`vqvae_256` codes:
+- `generator_256`: causal Transformer with a fixed context window and learned position embeddings.
+- `generator_256_rnn`: causal-conv / dilated residual stack (supports stateful step-by-step inference).
 
 ## Installation
 
@@ -163,14 +163,6 @@ python3 scripts/prepare_audio.py \
     /path/to/destination/u16/files
 ```
 
-**With metadata extraction:**
-```bash
-python3 scripts/prepare_audio.py \
-    /path/to/source/audio/files \
-    /path/to/destination/u16/files \
-    --with-meta
-```
-
 The script:
 - Converts all audio files to mono, 22050 Hz sample rate
 - Saves as 16-bit unsigned integer (`.u16`) format
@@ -181,200 +173,151 @@ The script:
 
 ## Training
 
-Training is a two-stage process: first train the VQ-VAE models, then train the generators.
+Training has three stages: (1) train the VQ-VAE, (2) train the diffusion decoder
+that renders audio from the VQ-VAE's codes, and (3) train the autoregressive
+generator over the codes. Stages 2 and 3 both consume the frozen VQ-VAE and are
+independent of each other.
 
-### Stage 1: Train VQ-VAE Models
+### Stage 1: Train the VQ-VAE
 
-Train encoder/decoder/codebook for each compression level using [`scripts/train_vqvae.py`](scripts/train_vqvae.py):
+Train the encoder/decoder/codebook using
+[`scripts/train_vqvae.py`](scripts/train_vqvae.py):
 
 ```bash
 python3 scripts/train_vqvae.py \
-    --model vqvae_512 \
+    --model vqvae_256 \
     --data-dir /path/to/audio/u16/files \
     [--batch-size 8] \
     [--input-length 65536] \
     [--epoch-steps 10000] \
-    [--learning-rate 2e-4] \
-    [--decay-rate 0.5] \
-    [--decay-steps <steps*10>] \
+    [--learning-rate 1e-4] \
+    [--decay-rate 0.9] \
+    [--loss stft] \
+    [--commit-weight 0.01] \
     [--output-dir weights] \
-    [--warmup-steps 1000] \
-    [--fp16]
-```
-
-Train each compression level:
-```bash
-# Train 512x compression
-python3 scripts/train_vqvae.py --model vqvae_512 --data-dir /path/to/data
-
-# Train 128x compression  
-python3 scripts/train_vqvae.py --model vqvae_128 --data-dir /path/to/data
-
-# Train 32x compression
-python3 scripts/train_vqvae.py --model vqvae_32 --data-dir /path/to/data
-
-# Train 8x compression
-python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/data
+    [--bf16] \
+    [--warmup-steps 1000]
 ```
 
 **Training Details:**
-- Uses multi-scale STFT loss for reconstruction quality
-- Codebook restart mechanism prevents code collapse
-- Saves weights only when loss improves (best loss tracking). Weights are saved without epoch numbers in filenames.
-- First epoch always saves (initial best loss = infinity)
-- Subsequent epochs only save if current loss < best loss
-- Supports mixed precision training (`--fp16`)
-- Gradient clipping (clipnorm=1.0) applied automatically
-- Configurable learning rate schedule: `--learning-rate`, `--decay-rate`, `--decay-steps`
+- Reconstruction loss is selectable: multi-scale `stft` (default), `mel`, or `mse`.
+- The codebook restart mechanism prevents code collapse.
+- `--warmup-steps N` runs an Adam *moment* warmup: N steps that settle the optimizer moments (m, v) with weights frozen, so real training starts from a good gradient-variance estimate (this replaces the old LR-ramp warmup).
+- `--bf16` enables `mixed_bfloat16` (Ampere+; half the memory, no loss scaling).
+- Weights (encoder, decoder, codebook) are saved every epoch to `--output-dir` without epoch numbers, so training is always resumable.
 
 **Resume Training:**
 ```bash
 python3 scripts/train_vqvae.py \
-    --model vqvae_512 \
+    --model vqvae_256 \
     --data-dir /path/to/data \
-    --start-epoch 5 \
-    --warmup-steps 1000  # Optional: warmup LR from 0 over first 1000 steps
+    --start-epoch 5
 ```
 
-**Learning Rate Warmup:**
-- Use `--warmup-steps N` to gradually increase learning rate from 0 to target LR over N steps
-- Helps initialize the internal state of the optimizer when resuming training
-- Default: 0 (no warmup)
+### Stage 2: Train the Diffusion Decoder
 
-**Note**: Weights are automatically saved to the `weights/` directory without epoch numbers. Weights are only saved when the loss improves (best loss tracking), ensuring you always have the best-performing checkpoint. The training script will print messages indicating whether weights were saved or skipped each epoch. Pre-trained VQ-VAE weights are provided in the `weights/` directory.
+Train the diffusion decoder using
+[`scripts/train_diffusion.py`](scripts/train_diffusion.py). The VQ-VAE encoder +
+codebook are frozen and used only to tokenize audio into integer codes; the
+denoiser learns to render a waveform from those codes:
 
-### Stage 2: Train Generators
+```bash
+python3 scripts/train_diffusion.py \
+    --diffusion diffusion_512 \
+    --data-dir /path/to/audio/u16/files \
+    --vqvae-weights-dir weights \
+    [--batch-size 8] \
+    [--input-length 65536] \
+    [--epoch-steps 10000] \
+    [--learning-rate 1e-4] \
+    [--decay-rate 0.9] \
+    [--grad-clip 1.0] \
+    [--output-dir weights] \
+    [--bf16]
+```
 
-Train autoregressive generators hierarchically using [`scripts/train_generator.py`](scripts/train_generator.py):
+**Training Details:**
+- Pick the `--diffusion` preset whose `dest_vqvae` matches your trained VQ-VAE (`diffusion_256` → `vqvae_256`, `diffusion_512` → `vqvae_512`).
+- `--input-length` must be a multiple of the compression rate (the script enforces this).
+- Trains with v-prediction (MSE against the v-target) on a continuous-time cosine schedule; timesteps are stratified per batch.
+- Waveforms are companded with a mild mu-law (`NORM_MU`, `NORM_STD` in [`vqwave/diffusion.py`](vqwave/diffusion.py)) so the data marginal matches the Gaussian diffusion prior. Re-derive these constants for a very different dataset.
+- Weights are saved every epoch as `{diffusion}_denoiser.weights.h5`, without epoch numbers, so training is resumable (`--start-epoch N` or `--load-weights`).
+- The deterministic VQ-VAE decoder is **not** used here — only the encoder + codebook.
+
+> **Note:** The diffusion decoder conditions on the codes your encoder currently
+> produces. Let the VQ-VAE converge first; if you retrain/change it afterward, the
+> codebook shifts and the diffusion decoder must be retrained.
+
+### Stage 3: Train the Generator
+
+Train the autoregressive generator using
+[`scripts/train_generator.py`](scripts/train_generator.py). The VQ-VAE is frozen
+and only used to produce the target codes:
 
 ```bash
 python3 scripts/train_generator.py \
-    --generator generator_512 \
+    --generator generator_256 \
     --data-dir /path/to/audio/u16/files \
     --vqvae-weights-dir weights \
     [--batch-size 8] \
     [--input-length 65536] \
     [--epoch-steps 10000] \
     [--learning-rate 1e-3] \
-    [--decay-rate 0.5] \
-    [--decay-steps <steps*10>] \
-    [--warmup-steps 1000] \
-    [--fp16]
+    [--warmup-steps 1000]
 ```
 
-Train all generators (can be done in parallel, as they only depend on VQ-VAE weights):
+Choose the architecture by config name:
 ```bash
-# Train unconditional 512x generator
-python3 scripts/train_generator.py --generator generator_512 --data-dir /path/to/data
+# Transformer generator
+python3 scripts/train_generator.py --generator generator_256 --data-dir /path/to/data
 
-# Train 128x generator (conditioned on 512x VQ-VAE codes)
-python3 scripts/train_generator.py --generator generator_128 --data-dir /path/to/data
-
-# Train 32x generator (conditioned on 128x VQ-VAE codes)
-python3 scripts/train_generator.py --generator generator_32 --data-dir /path/to/data
-
-# Train 8x generator (conditioned on 32x VQ-VAE codes)
-python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/data
+# RNN / causal-conv generator
+python3 scripts/train_generator.py --generator generator_256_rnn --data-dir /path/to/data
 ```
 
 **Training Details:**
-- Generators predict next code in sequence using configurable LSTM layers (default: 2 layers, 512 units each)
-- Context models process lower-res codes with dilated CNNs (fully configurable: dilations, kernel size, activation, upsample factor)
-- Uses sparse categorical crossentropy loss
-- VQ-VAE models are frozen during generator training
-- Gradient clipping (clipnorm=1.0) applied automatically
-- Configurable learning rate schedule: `--learning-rate`, `--decay-rate`, `--decay-steps`
-- Saves weights only when loss improves (best loss tracking). Weights are saved without epoch numbers in filenames.
-- First epoch always saves (initial best loss = infinity)
-- Subsequent epochs only save if current loss < best loss
-
-**Note**: Weights are automatically saved to the `weights/` directory without epoch numbers. Weights are only saved when the loss improves (best loss tracking), ensuring you always have the best-performing checkpoint. The training script will print messages indicating whether weights were saved or skipped each epoch. Pre-trained generator weights are provided in the `weights/` directory.
-
-**Resume Training:**
-```bash
-python3 scripts/train_generator.py \
-    --generator generator_512 \
-    --data-dir /path/to/data \
-    --start-epoch 4 \
-    --warmup-steps 1000  # Optional: warmup LR from 0 over first 1000 steps
-```
-
-**Learning Rate Warmup:**
-- Use `--warmup-steps N` to gradually increase learning rate from 0 to target LR over N steps
-- Helps initialize the internal state of the optimizer when resuming training
-- Default: 0 (no warmup)
+- The generator predicts the next code with sparse categorical crossentropy loss.
+- The VQ-VAE encoder/codebook are frozen.
+- Gradient clipping (clipnorm=1.0) is applied automatically.
+- Weights are saved when the loss improves (best-loss tracking), without epoch numbers.
 
 ## Generation
 
-Generate audio using trained models with [`scripts/generate_audio.py`](scripts/generate_audio.py):
+Generate audio using a trained generator + VQ-VAE with
+[`scripts/generate_audio.py`](scripts/generate_audio.py):
 
 ```bash
 python3 scripts/generate_audio.py \
-    --generators generator_512,generator_128,generator_32,generator_8 \
-    --length 10000 \
+    --generator generator_256 \
+    --length 512 \
     [--vqvae-weights-dir weights] \
     [--generator-weights-dir weights] \
     [--temperature 0.9] \
-    [--top-k 40] \
+    [--top-k 32] \
+    [--top-p 0.9] \
     [--seed <int>] \
-    [--play-intermediates] \
     [--output output.wav] \
     [--no-gpu]
 ```
 
 **Arguments:**
-- `--generators`: Comma-separated generator names or "all" (required)
-- `--length`: Number of codes to generate at the first/outer layer (highest compression, e.g., 512x). Subsequent levels calculated automatically (required)
+- `--generator`: Generator config name (`generator_256` or `generator_256_rnn`) (required)
+- `--length`: Number of codes to generate. Each code spans 256 audio samples (required). For the transformer generator this must be ≤ its `max_seq_len`.
 - `--vqvae-weights-dir`: Directory with VQ-VAE weights (default: `weights`)
 - `--generator-weights-dir`: Directory with generator weights (default: `weights`)
 - `--temperature`: Temperature for sampling (default: `0.9`)
 - `--top-k`: Top-k sampling, overrides temperature if set (default: `None`)
-- `--seed`: Random seed for first code (default: random)
-- `--play-intermediates`: Play intermediate audio at each generation level
+- `--top-p`: Top-p (nucleus) sampling, overrides top-k and temperature (default: `None`)
+- `--seed`: Initial code seed (default: random)
 - `--output`: Save audio to file (default: plays audio)
 - `--no-gpu`: Disable GPU (use CPU only)
 
-**Weight Loading:**
-- All weights are loaded without epoch numbers from `--generator-weights-dir` (e.g., `generator_512_generator.weights.h5`)
-- By default, both `--vqvae-weights-dir` and `--generator-weights-dir` default to `weights/`
-
 ### Sampling Methods
 
-- **Temperature sampling**: `--temperature 0.9` (default)
-  - Lower = more deterministic, Higher = more random
-  
-- **Top-k sampling**: `--top-k 40`
-  - Samples from top K most likely codes
-  
-- **Greedy**: `--top-k 1` or `--temperature 0.0`
-  - Always picks most likely code
-
-### Generator Selection
-
-Generate at different quality levels:
-
-```bash
-# Low quality (512x only)
-python3 scripts/generate_audio.py --generators generator_512
-
-# Medium quality (up to 128x)
-python3 scripts/generate_audio.py --generators generator_128
-
-# High quality (up to 32x)
-python3 scripts/generate_audio.py --generators generator_32
-
-# Full quality (all levels)
-python3 scripts/generate_audio.py --generators generator_8
-# or
-python3 scripts/generate_audio.py --generators all
-```
-
-### Output
-
-- If `--output` is specified, saves to file
-- Otherwise, plays audio using pyaudio
-- Use `--play-intermediates` to hear audio decoded at each intermediate generation level (useful for debugging)
-- Use `--no-gpu` to run on CPU (slower)
+- **Temperature sampling**: `--temperature 0.9` (lower = more deterministic, higher = more random)
+- **Top-k sampling**: `--top-k 32` (samples from the top K most likely codes)
+- **Top-p sampling**: `--top-p 0.9` (samples from the smallest set of codes whose cumulative probability exceeds p)
+- **Greedy**: omit sampling flags and use `--temperature 0.0`-like behavior via `--top-k 1`
 
 ## Testing VQ-VAE
 
@@ -383,95 +326,113 @@ Test VQ-VAE reconstruction quality using [`scripts/test_vqvae.py`](scripts/test_
 ```bash
 python3 scripts/test_vqvae.py \
     --audio /path/to/audio/file.mp3 \
-    --model vqvae_128 \
+    --model vqvae_256 \
     [--weights-dir weights] \
     [--output reconstructed.wav] \
     [--max-length 30] \
+    [--plot] \
     [--no-gpu]
 ```
 
 **Arguments:**
 - `--audio`: Input audio file (mp3, wav, m4a, etc.)
-- `--model`: VQ-VAE model to test (`vqvae_512`, `vqvae_128`, `vqvae_32`, `vqvae_8`)
+- `--model`: VQ-VAE model to test (`vqvae_256`)
 - `--weights-dir`: Directory containing weights (default: `weights`)
 - `--output`: Save reconstructed audio to file (default: plays audio)
 - `--max-length`: Maximum audio length in seconds (default: no limit)
+- `--plot`: Plot original vs. reconstructed waveforms
 - `--no-gpu`: Run on CPU instead of GPU
 
-**Example:**
-```bash
-python3 scripts/test_vqvae.py \
-    --audio song.mp3 \
-    --model vqvae_128 \
-    --weights-dir weights \
-    --output reconstructed.wav
-```
+## Testing the Diffusion Decoder
 
-## Testing Generators
-
-You can test generator quality by generating audio samples:
+Render an audio file through its codes with the diffusion decoder using
+[`scripts/test_diffusion.py`](scripts/test_diffusion.py). This encodes real audio
+to codes with the frozen VQ-VAE, then samples a waveform from those codes — the
+same rendering path used at generation time, so it isolates the diffusion
+decoder's quality:
 
 ```bash
-python3 scripts/generate_audio.py \
-    --generators generator_512 \
-    --generator-weights-dir weights \
-    --length 10000 \
-    --output test_512.wav
+python3 scripts/test_diffusion.py \
+    --audio /path/to/audio/file.mp3 \
+    --diffusion diffusion_512 \
+    [--weights-dir weights] \
+    [--steps 200] \
+    [--eta 0.0] \
+    [--output rendered.wav] \
+    [--max-length 30] \
+    [--plot] \
+    [--no-gpu]
 ```
+
+**Arguments:**
+- `--audio`: Input audio file (mp3, wav, m4a, etc.)
+- `--diffusion`: Diffusion config to test (`diffusion_256` or `diffusion_512`)
+- `--weights-dir`: Directory with the VQ-VAE and diffusion weights (default: `weights`)
+- `--steps`: Number of DDIM sampling steps (default: 200; more = slower, cleaner)
+- `--eta`: DDIM stochasticity (0 = deterministic, up to 1 = ancestral)
+- `--output`: Save rendered audio to file (default: plays audio)
+- `--max-length`: Maximum audio length in seconds (auto-trimmed to a whole number of codes)
+- `--plot`: Plot original vs. rendered waveforms
+- `--no-gpu`: Run on CPU instead of GPU
+
+Compare this against `test_vqvae.py` on the same clip: the codes are identical,
+so any difference is purely deterministic-decoder vs. diffusion-decoder rendering.
 
 ## Configuration
 
 Model configurations are defined in [`vqwave/config.py`](vqwave/config.py).
 
-### VQ-VAE Configs
+### VQ-VAE Config (`ENCODER_CONFIGS`)
 
-- `vqvae_512`: 512x compression, 1024 codes, 32-dim codebook vectors
-- `vqvae_128`: 128x compression, 1024 codes, 32-dim codebook vectors
-- `vqvae_32`: 32x compression, 1024 codes, 32-dim codebook vectors
-- `vqvae_8`: 8x compression, 1024 codes, 32-dim codebook vectors
+- `vqvae_256`: 256× compression, 2048 codes, 32-dim codebook vectors.
+- `vqvae_512`: 512× compression, 2048 codes, 32-dim codebook vectors.
 
-Each config specifies:
-- Encoder layers (convolutional)
-- Decoder layers (transposed convolutional)
-- Compression rate (product of encoder strides)
-- Codebook size and dimension
+Each preset specifies the encoder layers (convolutional), decoder layers
+(transposed convolutional), compression rate (product of encoder strides), and
+codebook size/dimension.
 
-### Generator Configs
+### Diffusion Config (`DIFFUSION_CONFIGS`)
 
-- `generator_512`: Unconditional, generates 512x codes
-- `generator_128`: Conditioned on 512x codes, generates 128x codes
-- `generator_32`: Conditioned on 128x codes, generates 32x codes
-- `generator_8`: Conditioned on 32x codes, generates 8x codes
+- `diffusion_256`: renders `vqvae_256` codes (256× upsample).
+- `diffusion_512`: renders `vqvae_512` codes (512× upsample).
 
-Each generator uses:
-- Configurable LSTM layers (default: 2 layers, 512 units each, configurable via `lstm_layers` and `lstm_units` in config)
-- Code embeddings (32-dim, matching codebook dimension)
-- Optional context model (fully configurable: dilations, kernel size, activation, upsample factor)
+Each preset names its `dest_vqvae`, the code-embedding width (`cond_dim`), the
+diffusion-time embedding width (`time_dim`), the prediction target (`v` / `eps`),
+and `encoder_layers` / `decoder_layers` in the same style as the VQ-VAE. The
+encoder strides must multiply to the destination VQ-VAE's compression rate.
+
+### Generator Configs (`GENERATOR_CONFIGS`)
+
+- `generator_256`: Transformer, unconditional, generates 256× codes.
+- `generator_256_rnn`: Causal-conv / RNN stack, unconditional, generates 256× codes.
 
 ## Project Structure
 
 ```
 VQWave/
 ├── vqwave/                 # Core modules
-│   ├── encoder.py         # VQ-VAE encoder/decoder/codebook
-│   ├── generator.py       # LSTM generators and context models
+│   ├── encoder.py          # VQ-VAE encoder/decoder/codebook
+│   ├── diffusion.py        # Diffusion rendering decoder (codes -> waveform)
+│   ├── generator.py        # Transformer and RNN/conv generators
 │   ├── audio.py            # Audio loading and processing
 │   ├── config.py           # Model configurations
-│   ├── layers.py           # Custom layers (codebook, etc.)
+│   ├── layers.py           # Custom layers (codebook, causal conv, etc.)
 │   └── util.py             # Utilities (accumulators, LR warmup, etc.)
-├── scripts/               # Training and generation scripts
-│   ├── prepare_audio.py   # Convert audio to .u16 format
-│   ├── train_vqvae.py     # Train VQ-VAE models
-│   ├── train_generator.py # Train generators
-│   ├── generate_audio.py # Generate audio samples
-│   └── test_vqvae.py     # Test VQ-VAE reconstruction
-├── weights/               # Trained model weights (VQ-VAE and generators)
-│   ├── vqvae_*_encoder.weights.h5
-│   ├── vqvae_*_decoder.weights.h5
-│   ├── vqvae_*_codebook.weights.h5
-│   ├── generator_*_generator.weights.h5
-│   └── generator_*_context.weights.h5
-└── setup.py              # Package configuration
+├── scripts/                # Training and generation scripts
+│   ├── prepare_audio.py    # Convert audio to .u16 format
+│   ├── train_vqvae.py      # Train VQ-VAE (reconstruction)
+│   ├── train_diffusion.py  # Train the diffusion decoder
+│   ├── train_generator.py  # Train the generator
+│   ├── generate_audio.py   # Generate audio samples
+│   ├── test_vqvae.py       # Test VQ-VAE reconstruction
+│   └── test_diffusion.py   # Test the diffusion decoder
+├── weights/                # Trained model weights
+│   ├── vqvae_512_encoder.weights.h5
+│   ├── vqvae_512_decoder.weights.h5
+│   ├── vqvae_512_codebook.weights.h5
+│   ├── diffusion_512_denoiser.weights.h5
+│   └── generator_256_generator.weights.h5
+└── setup.py                # Package configuration
 ```
 
 ## Troubleshooting
@@ -479,7 +440,6 @@ VQWave/
 ### GPU Memory Issues
 
 - Reduce `--batch-size` if you run out of GPU memory
-- Use `--fp16` for mixed precision training (reduces memory usage)
 - Reduce `--input-length` if needed
 
 ### Audio Processing Errors
@@ -504,28 +464,25 @@ python3 scripts/prepare_audio.py \
     /path/to/music/files \
     /path/to/training/data
 
-# 2. Train VQ-VAE models (in parallel or sequentially)
+# 2. Train the VQ-VAE
 python3 scripts/train_vqvae.py --model vqvae_512 --data-dir /path/to/training/data
-python3 scripts/train_vqvae.py --model vqvae_128 --data-dir /path/to/training/data
-python3 scripts/train_vqvae.py --model vqvae_32 --data-dir /path/to/training/data
-python3 scripts/train_vqvae.py --model vqvae_8 --data-dir /path/to/training/data
 
-# Optional: Test VQ-VAE
-python3 scripts/test_vqvae.py --audio /path/to/test/audio.mp3 --model vqvae_128 --weights-dir weights --output reconstructed.wav
+# Optional: Test VQ-VAE reconstruction
+python3 scripts/test_vqvae.py --audio /path/to/test/audio.mp3 --model vqvae_512 --output reconstructed.wav
 
-# 3. Train generators (can be done in parallel, they only depend on VQ-VAE weights)
-python3 scripts/train_generator.py --generator generator_512 --data-dir /path/to/training/data
-python3 scripts/train_generator.py --generator generator_128 --data-dir /path/to/training/data
-python3 scripts/train_generator.py --generator generator_32 --data-dir /path/to/training/data
-python3 scripts/train_generator.py --generator generator_8 --data-dir /path/to/training/data
+# 3. Train the diffusion decoder (VQ-VAE encoder + codebook frozen)
+python3 scripts/train_diffusion.py --diffusion diffusion_512 --data-dir /path/to/training/data
 
-# Optional: Test generators
-python3 scripts/generate_audio.py --generators generator_512 --generator-weights-dir weights --length 10000 --output test.wav
+# Optional: Render a clip through the codes with the diffusion decoder
+python3 scripts/test_diffusion.py --audio /path/to/test/audio.mp3 --diffusion diffusion_512 --output rendered.wav
 
-# 4. Generate audio (defaults to weights/ for both VQ-VAE and generator weights)
+# 4. Train the generator (VQ-VAE is frozen)
+python3 scripts/train_generator.py --generator generator_256 --data-dir /path/to/training/data
+
+# 5. Generate audio
 python3 scripts/generate_audio.py \
-    --generators all \
-    --length 50000 \
+    --generator generator_256 \
+    --length 512 \
     --temperature 0.9 \
     --output generated.wav
 ```

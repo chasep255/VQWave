@@ -49,13 +49,13 @@ def main():
         epilog="""
 Examples:
   # Test with default settings
-  %(prog)s --audio song.mp3 --model vqvae_128
+  %(prog)s --audio song.mp3 --model vqvae_256
 
   # Save output to file instead of playing
-  %(prog)s --audio song.mp3 --model vqvae_128 --output reconstructed.wav
+  %(prog)s --audio song.mp3 --model vqvae_256 --output reconstructed.wav
 
   # Test with different weights directory
-  %(prog)s --audio song.mp3 --model vqvae_512 --weights-dir custom_weights
+  %(prog)s --audio song.mp3 --model vqvae_256 --weights-dir custom_weights
         """
     )
     

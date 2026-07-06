@@ -1,7 +1,9 @@
 import os
+import queue
 import random
 import shlex
 import subprocess
+import threading
 
 import numpy as np
 import tensorflow as tf
@@ -57,51 +59,89 @@ def mu_law_dequantize(output, quantization_channels = 256):
     return mu_law_inverse(2 * (tf.cast(output, tf.float32) / mu) - 1, mu)
         
 class AudioDataset:
-    def __init__(self, path, min_length = 0, metadata = False, trim_start = 0.0, trim_end = 0.0):
-        self.data = []
-        self._shuffle_buf = None
+    """Random-crop dataset over .u16 raw audio files.
+
+    Stores only file paths and lengths (computed from file size, not by opening
+    or memory-mapping every file), so it scales to tens of thousands of files
+    without exhausting the open-file limit. Each crop opens its file on demand,
+    reads only the requested slice, and closes immediately. Returns raw f32
+    waveforms in [-1, 1].
+    """
+
+    def __init__(self, path, min_length=0, trim_start=0.0, trim_end=0.0):
+        self.data = []                       # list of (filepath, num_samples)
         self.total_samples = 0
         self._trim_start = trim_start
         self._trim_end = trim_end
+
         for f in os.listdir(path):
             if not f.endswith('.u16'):
                 continue
-            x = np.memmap(os.path.join(path, f), dtype = np.uint16, mode = 'r')
-            if x.shape[0] < min_length:
+            fp = os.path.join(path, f)
+            n = os.path.getsize(fp) // 2     # uint16 -> 2 bytes per sample
+            if n < max(min_length, 1):
                 continue
-            md = {'file_artists': [x.strip() for x in f.split('-')[0].split(',')]}
-            if metadata:
-                with open(os.path.join(path, f[:-4]) + '.meta', 'r') as fd:
-                    for l in fd:
-                        l = l.strip()
-                        if ':' in l:
-                            l = l.split(':')
-                            md[l[0]] = l[1]
-            self.data.append((x, md))
-            self.total_samples += self.data[-1][0].shape[0]
-            
+            self.data.append((fp, n))
+            self.total_samples += n
+
+        if not self.data:
+            raise ValueError('No .u16 files found in %s' % path)
+
     def random_sample(self, length):
-        # Keep trying until we find a song long enough
+        # Stateless (no shared shuffle buffer) so it is safe to call from many
+        # loader threads at once; each call opens and reads its own crop.
         while True:
-            if not self._shuffle_buf:
-                self._shuffle_buf = list(self.data)
-                random.shuffle(self._shuffle_buf)
-        
-            x, m = self._shuffle_buf.pop()
-            s = int(self._trim_start * x.shape[0])
-            e = x.shape[0] - length - int(x.shape[0] * self._trim_end)
-            
-            # Skip songs that are too short for the requested length
-            if e < s:
+            fp, n = random.choice(self.data)
+            s = int(self._trim_start * n)
+            e = n - length - int(n * self._trim_end)
+            if e < s:                                       # too short for this crop length
                 continue
-            
+
             i = random.randint(s, e)
-            return u16_to_f32(x[i : i + length]), m
-    
+            with open(fp, 'rb') as fd:                      # read only the crop, not the whole file
+                fd.seek(i * 2)                              # uint16 -> 2 bytes per sample
+                buf = fd.read(length * 2)
+            return u16_to_f32(np.frombuffer(buf, dtype=np.uint16))
+
     def random_batch(self, batch_size, sample_length):
-        x, m = zip(*[self.random_sample(sample_length) for i in range(batch_size)])
-        return np.float32(x), m
-    
+        return np.float32([self.random_sample(sample_length) for _ in range(batch_size)])
+
+
+class AudioLoader:
+    """Background-threaded prefetcher around AudioDataset.
+
+    A single daemon worker thread continuously builds random batches and pushes
+    them onto a bounded queue, so the training loop pulls a ready batch each step
+    instead of blocking on disk I/O -- loading overlaps with GPU compute. The
+    daemon thread exits with the process.
+    """
+
+    def __init__(self, path, length, batch_size, min_length=None,
+                 queue_size=8, trim_start=0.0, trim_end=0.0):
+        self.dataset = AudioDataset(path, min_length=min_length or length,
+                                    trim_start=trim_start, trim_end=trim_end)
+        self._length = length
+        self._batch_size = batch_size
+        self._queue = queue.Queue(maxsize=queue_size)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    @property
+    def data(self):
+        return self.dataset.data
+
+    @property
+    def total_samples(self):
+        return self.dataset.total_samples
+
+    def _worker(self):
+        while True:
+            self._queue.put(self.dataset.random_batch(self._batch_size, self._length))
+
+    def random_batch(self):
+        """Block only if no prefetched batch is ready (i.e. when I/O-bound)."""
+        return self._queue.get()
+
+
 class AudioMix:
     def __init__(self, path, batch_size):
         self.data = []

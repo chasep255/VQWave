@@ -11,8 +11,9 @@ from .layers import (
     Codebook,
 )
 from .encoder import Encoder, Decoder, CodebookManager
-from .config import ENCODER_CONFIGS, GENERATOR_CONFIGS
-from .generator import Generator, ContextModel, create_generator
+from .config import ENCODER_CONFIGS, GENERATOR_CONFIGS, DIFFUSION_CONFIGS
+from .generator import Generator, TransformerGenerator, create_generator
+from .diffusion import Denoiser, normalize, denormalize
 
 from .audio import (
     u16_to_f32,
@@ -25,6 +26,7 @@ from .audio import (
     mu_law_quantize,
     mu_law_dequantize,
     AudioDataset,
+    AudioLoader,
     AudioMix,
 )
 
@@ -51,10 +53,15 @@ __all__ = [
     'CodebookManager',
     'ENCODER_CONFIGS',
     'GENERATOR_CONFIGS',
+    'DIFFUSION_CONFIGS',
     # Generator
     'Generator',
-    'ContextModel',
+    'TransformerGenerator',
     'create_generator',
+    # Diffusion decoder
+    'Denoiser',
+    'normalize',
+    'denormalize',
     # Audio utilities
     'u16_to_f32',
     'f32_to_u16',
@@ -66,6 +73,7 @@ __all__ = [
     'mu_law_quantize',
     'mu_law_dequantize',
     'AudioDataset',
+    'AudioLoader',
     'AudioMix',
     # Training utilities
     'LRWarmupWrapper',
