@@ -17,8 +17,8 @@ import sys
 import numpy as np
 import tensorflow as tf
 
-from vqwave.encoder import Encoder, CodebookManager
-from vqwave.diffusion import Denoiser, denormalize
+from vqwave.encoder import Encoder, Decoder, CodebookManager
+from vqwave.diffusion import Denoiser, normalize, denormalize
 from vqwave.config import DIFFUSION_CONFIGS, ENCODER_CONFIGS, SAMPLE_RATE
 from vqwave.audio import load_audio, save_audio
 
@@ -98,17 +98,20 @@ Examples:
     compression = vqvae_config["compression_rate"]
     weights_dir = args.weights_dir
 
-    # Frozen VQ-VAE encoder + codebook (tokenize audio -> codes)
+    # Frozen VQ-VAE (encoder + codebook + decoder) produces the deterministic
+    # reconstruction the diffusion decoder refines.
     print(f"Creating frozen VQ-VAE ({dest_vqvae}) and diffusion decoder ({args.diffusion})...")
     encoder = Encoder(vqvae_config)
     codebook = CodebookManager(vqvae_config)
+    decoder = Decoder(vqvae_config)
     denoiser = Denoiser(config)
 
     encoder_path = os.path.join(weights_dir, f'{dest_vqvae}_encoder.weights.h5')
     codebook_path = os.path.join(weights_dir, f'{dest_vqvae}_codebook.weights.h5')
+    decoder_path = os.path.join(weights_dir, f'{dest_vqvae}_decoder.weights.h5')
     denoiser_path = os.path.join(weights_dir, f'{args.diffusion}_denoiser.weights.h5')
     for path, what in ((encoder_path, 'encoder'), (codebook_path, 'codebook'),
-                       (denoiser_path, 'diffusion denoiser')):
+                       (decoder_path, 'decoder'), (denoiser_path, 'diffusion denoiser')):
         if not os.path.exists(path):
             print(f"Error: {what} weights not found: {path}")
             sys.exit(1)
@@ -116,6 +119,7 @@ Examples:
     print(f"Loading weights from {weights_dir}...")
     encoder.load_weights(encoder_path)
     codebook.load_weights(codebook_path)
+    decoder.load_weights(decoder_path)
     denoiser.load_weights(denoiser_path)
 
     # Load audio file
@@ -141,18 +145,19 @@ Examples:
     audio = audio[:usable]
     print(f"Audio length: {len(audio) / SAMPLE_RATE:.2f} seconds ({len(audio)} samples)")
 
-    # Tokenize: audio -> integer codes
-    print("Encoding audio to codes...")
+    # Deterministic VQ-VAE reconstruction -> the conditioning waveform.
+    print("Encoding + decoding (deterministic VQ-VAE reconstruction)...")
     audio_tensor = tf.expand_dims(tf.constant(audio, dtype=tf.float32), 0)
     z_e = encoder(audio_tensor, training=False)
-    _, codes = codebook(z_e, training=False)
-    codes = tf.cast(codes, tf.int32)
+    z_q, codes = codebook(z_e, training=False)
+    decoded = decoder(z_q, training=False)
+    cond = normalize(decoded)
     print(f"Codes: {codes.shape[1]} tokens, "
           f"{len(set(codes.numpy().flatten()))} / {vqvae_config['num_codes']} unique")
 
-    # Render: codes -> waveform via DDIM sampling
+    # Render: refine the deterministic reconstruction via DDIM sampling
     print(f"Rendering with diffusion decoder ({args.steps} DDIM steps, eta={args.eta})...")
-    normalized = denoiser.generate(codes, nsteps=args.steps, eta=args.eta, progress=True)
+    normalized = denoiser.generate(cond, nsteps=args.steps, eta=args.eta, progress=True)
     rendered_audio = denormalize(normalized)[0].numpy()
     print(f"Rendered audio length: {len(rendered_audio) / SAMPLE_RATE:.2f} seconds")
 

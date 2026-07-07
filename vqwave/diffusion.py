@@ -1,19 +1,21 @@
 """
-Diffusion decoder: renders a waveform from the VQ codes.
+Diffusion decoder: refines the deterministic VQ-VAE reconstruction.
 
-A fully convolutional, conditional denoising-diffusion model. It is the
-high-fidelity "rendering" decoder -- the deterministic Decoder in encoder.py is
-only the "training" decoder that shapes the codebook. This model learns
-p(audio | z_q) and is used at generation time.
+A fully convolutional, conditional denoising-diffusion model that sharpens the
+deterministic VQ-VAE decoder's output. The decoded waveform is concatenated
+channel-wise with the noisy input, so the conditioning is present at full
+resolution and propagates through every level via the skip connections -- much
+stronger guidance than injecting codes at the coarse bottleneck.
 
 Architecture (WaveDiffuse-style U-Net; see DIFFUSION_CONFIGS in config.py):
-  - Contracting `stages` downsample the noisy waveform to the code rate. Each
-    level is two convs (strided down + stride-1 refine) and yields one skip.
-  - At the `middle` (code rate) the integer codes are embedded (a learned table)
-    and concatenated, then a stack of pre-activated residual dilated blocks
-    widens the receptive field.
+  - The noisy waveform and the decoded-waveform conditioning are concatenated into
+    a 2-channel input.
+  - Contracting `stages` downsample it. Each level is two convs (strided down +
+    stride-1 refine) and yields one skip.
+  - The `middle` projects into a residual stream, then a stack of pre-activated
+    residual dilated blocks widens the receptive field.
   - Expanding stages mirror the contracting path: concat the level's skip, fuse,
-    then upsample (linear resize + conv, or transposed conv).
+    then upsample with a transposed conv.
   - Every conv is FiLM-conditioned on the diffusion time (AdaptiveShiftScale).
   - A final 1-channel float32 projection produces the (v / eps) prediction.
 
@@ -149,8 +151,13 @@ def _res_block(x, t, channels, kernel, dilation):
 class Denoiser(keras.Model):
     """Conditional convolutional waveform denoiser for the diffusion decoder.
 
-    Inputs:  (audio (B, L) normalized waveform, time (B,) in [0, 1],
-              codes  (B, L/compression) integer VQ code ids)
+    Conditioned on the deterministic VQ-VAE reconstruction: the decoded waveform
+    is concatenated channel-wise with the noisy input, so the guidance is present
+    at full resolution and flows through every level (via the skips). The model
+    acts as a refiner on top of the deterministic decoder.
+
+    Inputs:  (audio (B, L) normalized noisy waveform, time (B,) in [0, 1],
+              decoded (B, L) normalized deterministic VQ-VAE reconstruction)
     Output:  prediction (B, L) -- v-target (default) or noise eps.
     """
 
@@ -160,12 +167,13 @@ class Denoiser(keras.Model):
 
         vqvae = ENCODER_CONFIGS[config["dest_vqvae"]]
         compression = vqvae["compression_rate"]
-        num_codes = vqvae["num_codes"]
 
         stages = config["stages"]
         middle = config["middle"]
 
-        # The contracting stages must downsample by exactly compression_rate.
+        # The U-Net downsamples by the product of the stage strides; keeping this
+        # equal to compression_rate makes valid input lengths (multiples of the
+        # VQ-VAE compression) line up with the U-Net's down/up symmetry.
         down = 1
         for s in stages:
             down *= s["stride"]
@@ -178,23 +186,27 @@ class Denoiser(keras.Model):
 
         input_audio = Input((None,), name='audio')
         input_time = Input((), name='time')
-        input_codes = Input((None,), dtype='int32', name='codes')
+        input_decoded = Input((None,), name='decoded')
 
         t = TimeEmbedding(config["time_dim"])(input_time)
-        zc = layers.Embedding(num_codes, config["cond_dim"], name='code_embedding')(input_codes)
+
+        # --- Concatenate the noisy input with the decoded-waveform conditioning
+        # into a 2-channel signal, then run the U-Net. ---
+        x = layers.Concatenate(axis=-1, name='cond_concat')((
+            layers.Reshape((-1, 1))(input_audio),
+            layers.Reshape((-1, 1))(input_decoded),
+        ))
 
         # --- Contracting path: two convs per level (strided down + refine), one
         # skip per level. Skips let the decoder recover high-frequency detail. ---
-        x = layers.Reshape((-1, 1))(input_audio)
         skips = []
         for s in stages:
             x = _film_conv(x, t, s["channels"], s["resample_kernel"], stride=s["stride"])  # downsample
             x = _film_conv(x, t, s["channels"], s["conv_kernel"])                           # refine
             skips.append(x)
 
-        # --- Middle (code rate): inject codes, project into the residual stream,
-        # then a stack of pre-activated residual dilated blocks. ---
-        x = layers.Concatenate(axis=-1, name='code_concat')((x, zc))
+        # --- Middle: project into the residual stream, then a stack of
+        # pre-activated residual dilated blocks. ---
         x = _film_conv(x, t, middle[0]["channels"], 1, activation=None)  # project to residual width
         for m in middle:
             x = _res_block(x, t, m["channels"], m["kernel"], m.get("dilation", 1))
@@ -213,10 +225,9 @@ class Denoiser(keras.Model):
         x = layers.Conv1D(1, 1, dtype='float32', name='output_proj')(x)
         x = layers.Flatten(dtype='float32')(x)
 
-        super().__init__(inputs=(input_audio, input_time, input_codes),
+        super().__init__(inputs=(input_audio, input_time, input_decoded),
                          outputs=x, **kwargs)
         self.compression = compression
-        self.num_codes = num_codes
         self.prediction = config["prediction"]
 
     # ----- Continuous-time cosine (angular) schedule -----
@@ -256,23 +267,24 @@ class Denoiser(keras.Model):
             eps = nr * x_t + sr * pred
         return tf.clip_by_value(x0, -3.0, 3.0), eps
 
-    def generate(self, codes, nsteps=200, eta=0.0, initial_noise=None, progress=False):
-        """DDIM sampling from noise (t=0) to signal (t=1), conditioned on codes.
+    def generate(self, decoded, nsteps=200, eta=0.0, initial_noise=None, progress=False):
+        """DDIM sampling from noise (t=0) to signal (t=1), conditioned on the
+        deterministic VQ-VAE reconstruction.
 
-        codes: integer VQ code ids of shape (B, T); the output length is
-        T * compression. eta controls stochasticity: 0 = deterministic DDIM, up to
-        1 = fully ancestral. Returns normalized waveforms (B, L); call denormalize()
-        to get f32 audio in [-1, 1].
+        decoded: normalized deterministic reconstruction of shape (B, L) (the
+        output has the same length). eta controls stochasticity: 0 = deterministic
+        DDIM, up to 1 = fully ancestral. Returns normalized waveforms (B, L); call
+        denormalize() to get f32 audio in [-1, 1].
         """
-        codes = tf.cast(tf.convert_to_tensor(codes), tf.int32)
-        batch = tf.shape(codes)[0]
-        length = tf.shape(codes)[1] * self.compression
+        decoded = tf.convert_to_tensor(decoded)
+        batch = tf.shape(decoded)[0]
+        length = tf.shape(decoded)[1]
         x_t = tf.random.normal((batch, length)) if initial_noise is None else initial_noise
         times = tf.cast(tf.linspace(0.0, 1.0, nsteps + 1), tf.float32)
         x0 = x_t
         for i in range(nsteps):
             t = tf.fill((batch,), times[i])
-            pred = self((x_t, t, codes), training=False)
+            pred = self((x_t, t, decoded), training=False)
             x0, eps = self.split_prediction(x_t, pred, t)
             if eta > 0.0:
                 eps = eta * tf.random.normal(tf.shape(eps)) + tf.sqrt(1.0 - eta ** 2) * eps

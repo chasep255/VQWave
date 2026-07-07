@@ -84,10 +84,10 @@ ENCODER_CONFIGS = {
 
 # Diffusion decoder configuration presets
 #
-# A conditional denoising-diffusion model that renders a waveform from the VQ
-# codes -- the high-fidelity "rendering" decoder (the deterministic Decoder is
-# only the "training" decoder that shapes the codebook). Conditioned on the
-# integer codes.
+# A conditional denoising-diffusion model that refines the deterministic VQ-VAE
+# reconstruction. The decoded waveform is concatenated channel-wise with the noisy
+# input, so the conditioning is present at full resolution and flows through every
+# level via the skips -- much stronger than injecting codes at the bottleneck.
 #
 # Fully convolutional -- no attention or positional embeddings -- so it runs on
 # arbitrary-length audio (any multiple of compression_rate). A WaveDiffuse-style
@@ -97,17 +97,14 @@ ENCODER_CONFIGS = {
 #     refine / skip-fuse conv). Each level is TWO convs and contributes ONE skip
 #     connection. The product of the stage strides must equal the destination
 #     VQ-VAE's compression_rate.
-#   - `middle`: at the bottleneck (the code rate) the integer codes are embedded
-#     (a learned table of width `cond_dim`) and concatenated, projected to the
-#     middle width, then a stack of pre-activated residual dilated blocks widens
-#     the receptive field. No attention. (All middle blocks share a channel width.)
+#   - `middle`: a stack of pre-activated residual dilated blocks (projected into a
+#     shared residual width) that widens the receptive field. No attention.
 # Every conv is FiLM-conditioned on the diffusion time. Upsampling is a transposed
 # conv (keep resample_kernel divisible by stride to avoid checkerboard). A final
 # 1-channel projection to the (v / eps) prediction is appended automatically.
 DIFFUSION_CONFIGS = {
     "diffusion_256": {
-        "dest_vqvae": "vqvae_256",         # renders codes for 256x compression
-        "cond_dim": 32,                    # code-id embedding width
+        "dest_vqvae": "vqvae_256",         # refines this VQ-VAE's reconstruction (256x)
         "time_dim": 256,                   # diffusion-time embedding width
         "prediction": "v",                 # "v" (recommended) or "eps"
         # Contract/expand levels; product of strides == 256. Two convs + one skip
@@ -118,7 +115,7 @@ DIFFUSION_CONFIGS = {
             {"channels": 256, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
             {"channels": 512, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
         ],
-        # Bottleneck (code rate): codes injected here, then dilated convs.
+        # Middle: pre-activated residual dilated blocks.
         "middle": [
             {"channels": 512, "kernel": 3, "dilation": 1},
             {"channels": 512, "kernel": 3, "dilation": 2},
@@ -127,8 +124,7 @@ DIFFUSION_CONFIGS = {
         ],
     },
     "diffusion_512": {
-        "dest_vqvae": "vqvae_512",         # renders codes for 512x compression
-        "cond_dim": 32,
+        "dest_vqvae": "vqvae_512",         # refines this VQ-VAE's reconstruction (512x)
         "time_dim": 32,
         "prediction": "v",
         # Contract/expand levels; product of strides == 512. Two convs + one skip
@@ -146,11 +142,7 @@ DIFFUSION_CONFIGS = {
             {"channels": 512, "kernel": 3, "dilation": 4},
             {"channels": 512, "kernel": 3, "dilation": 8},
             {"channels": 512, "kernel": 3, "dilation": 16},
-            {"channels": 512, "kernel": 3, "dilation": 1},
-            {"channels": 512, "kernel": 3, "dilation": 2},
-            {"channels": 512, "kernel": 3, "dilation": 4},
-            {"channels": 512, "kernel": 3, "dilation": 8},
-            {"channels": 512, "kernel": 3, "dilation": 16},
+            {"channels": 512, "kernel": 3, "dilation": 32},
 
         ],
     },

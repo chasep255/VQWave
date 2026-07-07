@@ -14,7 +14,7 @@ import time
 import tensorflow as tf
 from tensorflow import keras
 
-from vqwave.encoder import Encoder, CodebookManager
+from vqwave.encoder import Encoder, Decoder, CodebookManager
 from vqwave.diffusion import Denoiser, normalize
 from vqwave.config import DIFFUSION_CONFIGS, ENCODER_CONFIGS, SAMPLE_RATE
 from vqwave.audio import AudioLoader
@@ -76,13 +76,17 @@ def main():
             f"--input-length ({args.input_length}) must be a multiple of the "
             f"compression rate ({compression})")
 
-    # Frozen VQ-VAE encoder + codebook produce the conditioning codes z_q.
+    # Frozen VQ-VAE (encoder + codebook + decoder) produces the deterministic
+    # reconstruction the diffusion model is conditioned on.
     encoder = Encoder(vqvae_config)
     codebook = CodebookManager(vqvae_config)
+    decoder = Decoder(vqvae_config)
     encoder.load_weights(os.path.join(args.vqvae_weights_dir, f'{dest_vqvae}_encoder.weights.h5'))
     codebook.load_weights(os.path.join(args.vqvae_weights_dir, f'{dest_vqvae}_codebook.weights.h5'))
+    decoder.load_weights(os.path.join(args.vqvae_weights_dir, f'{dest_vqvae}_decoder.weights.h5'))
     encoder.trainable = False
     codebook.trainable = False
+    decoder.trainable = False
     print(f"Loaded frozen VQ-VAE: {dest_vqvae}")
 
     denoiser = Denoiser(config)
@@ -117,10 +121,11 @@ def main():
 
     @tf.function
     def train_step(audio_batch):
-        # Integer conditioning codes from the frozen VQ-VAE.
+        # Deterministic VQ-VAE reconstruction -> the conditioning waveform.
         z_e = encoder(audio_batch, training=False)
-        _, codes = codebook(z_e, training=False)
-        codes = tf.cast(codes, tf.int32)
+        z_q, _ = codebook(z_e, training=False)
+        decoded = decoder(z_q, training=False)
+        cond = normalize(decoded)
 
         # Diffusion target lives in the normalized (companded) domain.
         x = normalize(audio_batch)
@@ -132,7 +137,7 @@ def main():
         target = denoiser.target(x, noise, t)
 
         with tf.GradientTape() as tape:
-            pred = denoiser((x_t, t, codes), training=True)
+            pred = denoiser((x_t, t, cond), training=True)
             loss = tf.reduce_mean(tf.square(pred - target))
 
         grads = tape.gradient(loss, denoiser.trainable_weights)
