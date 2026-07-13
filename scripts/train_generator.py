@@ -120,24 +120,26 @@ def main():
     vqvae_config = ENCODER_CONFIGS[dest_vqvae_key]
 
     # For transformers the code-sequence length (input_length / compression) is
-    # pinned to the position-embedding window: too long overruns max_seq_len and
-    # crashes; too short leaves the tail of the position embeddings untrained.
-    # Default it to fill the window exactly, and reject any mismatching override.
+    # pinned to the position-embedding window. The next-token shift consumes one
+    # code (input = codes[:-1], target = codes[1:]), so to supervise all
+    # max_seq_len positions we must load max_seq_len + 1 codes. Default it, and
+    # reject any mismatching override.
     if gen_config.get("type") == "transformer":
         compression = vqvae_config["compression_rate"]
         max_seq_len = gen_config["transformer"].get("max_seq_len", 512)
-        required_length = max_seq_len * compression
+        required_length = (max_seq_len + 1) * compression
         if args.input_length is None:
             args.input_length = required_length
             print(f"--input-length not set; defaulting to {required_length} "
-                  f"(max_seq_len {max_seq_len} * {compression}x compression)")
+                  f"((max_seq_len {max_seq_len} + 1) * {compression}x compression)")
         elif args.input_length != required_length:
             seq_len = args.input_length // compression
             raise ValueError(
                 f"--input-length {args.input_length} yields {seq_len} codes at "
                 f"{compression}x compression, but '{args.generator}' has "
                 f"max_seq_len={max_seq_len}. Use --input-length {required_length} "
-                f"(= max_seq_len * compression) to fill the context window exactly."
+                f"(= (max_seq_len + 1) * compression) so the shift supervises "
+                f"all {max_seq_len} positions."
             )
     elif args.input_length is None:
         args.input_length = 2**16

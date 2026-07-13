@@ -8,6 +8,9 @@ class AverageAccumulator:
         self.sum = 0.0
     
     def add(self, x, w=1.0):
+        # float() handles tf tensors of any dtype (e.g. bf16, which numpy can't
+        # ingest directly via __array__).
+        x = float(x)
         if np.isfinite(x):
             self.count += w
             self.sum += x * w
