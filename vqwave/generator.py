@@ -365,8 +365,10 @@ def create_generator(generator_config, stateful=False, batch_size=None, name=Non
             name=config_name
         )
 
-    # Standard RNN/Conv generator
-    embedding_dim = dest_vqvae["code_dim"]
+    # Standard RNN/Conv generator. The code-embedding width defaults to the
+    # VQ-VAE's code_dim, but a generator config may override it (e.g. an LSTM
+    # stack wants a wider embedding than the codebook's 32-dim vectors).
+    embedding_dim = config.get("embedding_dim", dest_vqvae["code_dim"])
 
     generator_layers = config.get("generator_layers")
     if generator_layers is None:

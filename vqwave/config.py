@@ -150,10 +150,11 @@ DIFFUSION_CONFIGS = {
 
 # Generator configuration presets
 #
-# A single unconditional generator predicts the 256x VQ-VAE codes directly.
-# Two interchangeable architectures are provided (both target vqvae_256):
-#   - generator_256:     causal Transformer (fixed context window)
-#   - generator_256_rnn: causal-conv / RNN stack
+# A single unconditional generator predicts a VQ-VAE's codes directly. Each preset
+# names its target VQ-VAE via `dest_vqvae`. Three architectures are provided:
+#   - generator_256:     causal Transformer, fixed context window (targets vqvae_256)
+#   - generator_256_rnn: causal-conv / RNN stack (targets vqvae_256)
+#   - generator_512_lstm: stacked-LSTM stack (targets vqvae_512)
 GENERATOR_CONFIGS = {
     # Transformer-based generator (fixed context window with position embeddings)
     "generator_256": {
@@ -189,6 +190,17 @@ GENERATOR_CONFIGS = {
             {"type": "residual", "channels": 512, "kernel": 3, "dilation": 16, "activation": "elu"},
             {"type": "residual", "channels": 512, "kernel": 3, "dilation": 32, "activation": "elu"},
             {"type": "activation", "activation": "elu"},
+        ],
+    },
+    # Stacked-LSTM generator targeting the 512x VQ-VAE (supports stateful inference).
+    "generator_512_lstm": {
+        "type": "rnn",
+        "dest_vqvae": "vqvae_512",
+        "embedding_dim": 32,
+        "generator_layers": [
+            {"type": "lstm", "units": 768},
+            {"type": "lstm", "units": 768},
+            {"type": "lstm", "units": 768},
         ],
     },
 }
