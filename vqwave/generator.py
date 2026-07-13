@@ -60,10 +60,12 @@ class TransformerGenerator(Model):
             ffn_out = layers.Dense(embedding_dim, name=f'ffn2_{i}')(ffn_out)
             x = x + ffn_out
 
-        # Final layer norm and output projection
+        # Final layer norm and output projection. Force float32 logits so the
+        # softmax / cross-entropy stay in full precision under mixed_bfloat16 --
+        # bf16's 7-bit mantissa over 2048 classes otherwise stalls convergence.
         x = layers.LayerNormalization(name='final_ln')(x)
         x = layers.Dense(embedding_dim, activation='gelu', name='final_dense')(x)
-        outputs = layers.Dense(num_codes, name='output_logits')(x)
+        outputs = layers.Dense(num_codes, dtype='float32', name='output_logits')(x)
 
         super().__init__(inputs=input_codes, outputs=outputs, name=name, **kwargs)
 
