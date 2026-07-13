@@ -131,7 +131,15 @@ def _make_rnn_generate_loop(generator, mode, temperature, top_k, top_p):
 
 
 def _make_transformer_generate_loop(generator, mode, temperature, top_k, top_p):
-    """Create a generation loop for TransformerGenerator (fixed context window)."""
+    """Create a generation loop for TransformerGenerator.
+
+    Uses a sliding context window: each step conditions on at most the last
+    max_seq_len tokens, re-anchored to positions 0..len-1. This lifts the
+    fixed-window ceiling so num_codes may exceed max_seq_len -- every token still
+    gets a full window of context (slide-by-1). Absolute position embeddings mean
+    context beyond max_seq_len is dropped rather than attended, as expected.
+    """
+    max_seq_len = generator.max_seq_len
 
     @tf.function
     def generate_loop(initial_code, num_codes):
@@ -145,8 +153,10 @@ def _make_transformer_generate_loop(generator, mode, temperature, top_k, top_p):
         line_buffer = tf.TensorArray(dtype=tf.int32, size=LINE_LENGTH, dynamic_size=False)
 
         for i in tf.range(1, num_codes):
-            current_seq = sequence.stack()[:i]
-            input_seq = tf.expand_dims(current_seq, 0)  # [1, i]
+            # Condition on at most the last max_seq_len tokens (sliding window).
+            start = tf.maximum(0, i - max_seq_len)
+            current_seq = sequence.stack()[start:i]
+            input_seq = tf.expand_dims(current_seq, 0)  # [1, min(i, max_seq_len)]
 
             logits = generator(input_seq, training=False)
             logits = logits[0, -1]  # Last position logits
@@ -216,11 +226,10 @@ def generate_codes(generator, num_codes, temperature=None, top_k=None, top_p=Non
 
     if isinstance(generator, TransformerGenerator):
         if num_codes > generator.max_seq_len:
-            raise ValueError(
-                f"Transformer generator can only generate up to {generator.max_seq_len} codes, "
-                f"but {num_codes} requested. Use --length {generator.max_seq_len} or less."
-            )
-        print(f"Using transformer mode (generating {num_codes}/{generator.max_seq_len} codes)")
+            print(f"Using transformer mode (generating {num_codes} codes with a "
+                  f"sliding {generator.max_seq_len}-code context window)")
+        else:
+            print(f"Using transformer mode (generating {num_codes}/{generator.max_seq_len} codes)")
         generate_fn = _make_transformer_generate_loop(
             generator, mode, temp_tensor, top_k_tensor, top_p_tensor
         )
@@ -330,19 +339,15 @@ Examples:
     codebook.load_weights(os.path.join(args.vqvae_weights_dir, f'{dest_vqvae_key}_codebook.weights.h5'))
     print(f"Loaded VQ-VAE decoder: {dest_vqvae_key} ({compression}x compression)")
 
-    # Default / guard the generation length. A transformer can't generate past
-    # its position-embedding window, so default to it and reject anything longer.
+    # Default the generation length. A transformer defaults to one full window;
+    # longer requests are served by a sliding context window (see the generate
+    # loop), so lengths beyond max_seq_len are allowed.
     is_transformer = gen_config.get('type') == 'transformer'
     if is_transformer:
         max_seq_len = gen_config['transformer'].get('max_seq_len', 512)
         if args.length is None:
             args.length = max_seq_len
             print(f"--length not set; defaulting to max_seq_len={max_seq_len}")
-        elif args.length > max_seq_len:
-            parser.error(
-                f"--length {args.length} exceeds the transformer's max_seq_len "
-                f"({max_seq_len}); use --length {max_seq_len} or less."
-            )
     elif args.length is None:
         parser.error("--length is required for non-transformer generators.")
 

@@ -28,7 +28,7 @@ for gpu in gpus:
 
 
 @tf.function
-def train_step(encoder, codebook, generator, optimizer, audio_batch):
+def train_step(encoder, codebook, generator, optimizer, audio_batch, code_margin=0):
     """
     Single training step for the generator.
 
@@ -38,6 +38,10 @@ def train_step(encoder, codebook, generator, optimizer, audio_batch):
         generator: Generator model
         optimizer: Optimizer
         audio_batch: Audio batch [batch, samples]
+        code_margin: Number of codes to drop from each end before training. The
+            'same'-padded encoder computes edge codes from zero-padding, so they
+            are out-of-distribution; trimming them keeps the generator on codes
+            with a full real-audio receptive field.
 
     Returns:
         dict with 'loss' and 'accuracy'
@@ -45,6 +49,10 @@ def train_step(encoder, codebook, generator, optimizer, audio_batch):
     # Encode audio to codes (outside tape, frozen model)
     z_e = encoder(audio_batch, training=False)
     _, target_codes = codebook(z_e, training=False)
+
+    # Drop padding-contaminated boundary codes.
+    if code_margin > 0:
+        target_codes = target_codes[:, code_margin:-code_margin]
 
     with tf.GradientTape() as tape:
         # Predict next code: input is codes[:-1], target is codes[1:]
@@ -94,7 +102,13 @@ def main():
                        help='Number of warmup steps for learning rate (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=None,
                        help='Input audio length in samples (transformers default to '
-                            'max_seq_len * compression; others default to 65536)')
+                            '(max_seq_len + 1 + 2*code_margin) * compression; others '
+                            'default to 65536 plus the margin)')
+    parser.add_argument('--code-margin', type=int, default=24,
+                       help='Codes dropped from each end after encoding to discard '
+                            'the zero-padded boundary codes the same-padded encoder '
+                            'produces (default: 24, ~half the encoder receptive '
+                            'field; 0 disables)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
@@ -122,27 +136,32 @@ def main():
     # For transformers the code-sequence length (input_length / compression) is
     # pinned to the position-embedding window. The next-token shift consumes one
     # code (input = codes[:-1], target = codes[1:]), so to supervise all
-    # max_seq_len positions we must load max_seq_len + 1 codes. Default it, and
-    # reject any mismatching override.
+    # max_seq_len positions we need max_seq_len + 1 codes AFTER trimming
+    # code_margin off each end, i.e. load max_seq_len + 1 + 2*code_margin codes.
+    # Default it, and reject any mismatching override.
+    compression = vqvae_config["compression_rate"]
+    margin_samples = 2 * args.code_margin * compression
     if gen_config.get("type") == "transformer":
-        compression = vqvae_config["compression_rate"]
         max_seq_len = gen_config["transformer"].get("max_seq_len", 512)
-        required_length = (max_seq_len + 1) * compression
+        required_length = (max_seq_len + 1) * compression + margin_samples
         if args.input_length is None:
             args.input_length = required_length
             print(f"--input-length not set; defaulting to {required_length} "
-                  f"((max_seq_len {max_seq_len} + 1) * {compression}x compression)")
+                  f"((max_seq_len {max_seq_len} + 1 + 2*margin {args.code_margin}) "
+                  f"* {compression}x compression)")
         elif args.input_length != required_length:
             seq_len = args.input_length // compression
             raise ValueError(
                 f"--input-length {args.input_length} yields {seq_len} codes at "
                 f"{compression}x compression, but '{args.generator}' has "
-                f"max_seq_len={max_seq_len}. Use --input-length {required_length} "
-                f"(= (max_seq_len + 1) * compression) so the shift supervises "
-                f"all {max_seq_len} positions."
+                f"max_seq_len={max_seq_len} and code_margin={args.code_margin}. Use "
+                f"--input-length {required_length} (= (max_seq_len + 1 + 2*margin) "
+                f"* compression) so the shift supervises all {max_seq_len} positions "
+                f"after trimming."
             )
     elif args.input_length is None:
-        args.input_length = 2**16
+        # Add the trimmed margin so the retained sequence stays ~65536 samples.
+        args.input_length = 2**16 + margin_samples
     encoder = Encoder(vqvae_config)
     codebook = CodebookManager(vqvae_config)
 
@@ -214,7 +233,7 @@ def main():
 
         for step in range(args.epoch_steps):
             batch = loader.random_batch()
-            result = train_step(encoder, codebook, generator, opt, batch)
+            result = train_step(encoder, codebook, generator, opt, batch, args.code_margin)
 
             loss_acc.add(result['loss'])
             accuracy_acc.add(result['accuracy'])
