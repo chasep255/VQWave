@@ -92,14 +92,15 @@ def main():
                        help='Load existing weights from output directory (default: False)')
     parser.add_argument('--warmup-steps', type=int, default=0,
                        help='Number of warmup steps for learning rate (default: 0, no warmup)')
-    parser.add_argument('--input-length', type=int, default=2**16,
-                       help='Input audio length in samples (default: 65536)')
+    parser.add_argument('--input-length', type=int, default=None,
+                       help='Input audio length in samples (transformers default to '
+                            'max_seq_len * compression; others default to 65536)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
                        help='Initial learning rate (default: 1e-3)')
-    parser.add_argument('--decay-rate', type=float, default=0.85,
-                       help='Multiplicative LR decay applied every --decay-steps (default: 0.85)')
+    parser.add_argument('--decay-rate', type=float, default=0.9,
+                       help='Multiplicative LR decay applied every --decay-steps (default: 0.9)')
     parser.add_argument('--decay-steps', type=int, default=None,
                        help='Number of steps for each decay (default: epoch_steps)')
     parser.add_argument('--bf16', action='store_true', default=False,
@@ -117,6 +118,29 @@ def main():
 
     # Create VQ-VAE (for codes we're predicting), frozen during training
     vqvae_config = ENCODER_CONFIGS[dest_vqvae_key]
+
+    # For transformers the code-sequence length (input_length / compression) is
+    # pinned to the position-embedding window: too long overruns max_seq_len and
+    # crashes; too short leaves the tail of the position embeddings untrained.
+    # Default it to fill the window exactly, and reject any mismatching override.
+    if gen_config.get("type") == "transformer":
+        compression = vqvae_config["compression_rate"]
+        max_seq_len = gen_config["transformer"].get("max_seq_len", 512)
+        required_length = max_seq_len * compression
+        if args.input_length is None:
+            args.input_length = required_length
+            print(f"--input-length not set; defaulting to {required_length} "
+                  f"(max_seq_len {max_seq_len} * {compression}x compression)")
+        elif args.input_length != required_length:
+            seq_len = args.input_length // compression
+            raise ValueError(
+                f"--input-length {args.input_length} yields {seq_len} codes at "
+                f"{compression}x compression, but '{args.generator}' has "
+                f"max_seq_len={max_seq_len}. Use --input-length {required_length} "
+                f"(= max_seq_len * compression) to fill the context window exactly."
+            )
+    elif args.input_length is None:
+        args.input_length = 2**16
     encoder = Encoder(vqvae_config)
     codebook = CodebookManager(vqvae_config)
 

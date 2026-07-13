@@ -278,8 +278,9 @@ Examples:
     parser.add_argument('--generator', type=str, required=True,
                        choices=list(GENERATOR_CONFIGS.keys()),
                        help=f'Generator name (available: {", ".join(GENERATOR_CONFIGS.keys())})')
-    parser.add_argument('--length', type=int, required=True,
-                       help='Number of codes to generate')
+    parser.add_argument('--length', type=int, default=None,
+                       help='Number of codes to generate (transformers default to '
+                            'their max_seq_len; required for other generators)')
     parser.add_argument('--temperature', type=float, default=DEFAULT_TEMPERATURE,
                        help=f'Temperature for sampling (default: {DEFAULT_TEMPERATURE})')
     parser.add_argument('--top-k', type=int, default=None,
@@ -329,8 +330,23 @@ Examples:
     codebook.load_weights(os.path.join(args.vqvae_weights_dir, f'{dest_vqvae_key}_codebook.weights.h5'))
     print(f"Loaded VQ-VAE decoder: {dest_vqvae_key} ({compression}x compression)")
 
-    # Create generator
+    # Default / guard the generation length. A transformer can't generate past
+    # its position-embedding window, so default to it and reject anything longer.
     is_transformer = gen_config.get('type') == 'transformer'
+    if is_transformer:
+        max_seq_len = gen_config['transformer'].get('max_seq_len', 512)
+        if args.length is None:
+            args.length = max_seq_len
+            print(f"--length not set; defaulting to max_seq_len={max_seq_len}")
+        elif args.length > max_seq_len:
+            parser.error(
+                f"--length {args.length} exceeds the transformer's max_seq_len "
+                f"({max_seq_len}); use --length {max_seq_len} or less."
+            )
+    elif args.length is None:
+        parser.error("--length is required for non-transformer generators.")
+
+    # Create generator
     if is_transformer:
         generator = create_generator(args.generator)
     else:

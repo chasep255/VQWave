@@ -152,9 +152,10 @@ DIFFUSION_CONFIGS = {
 #
 # A single unconditional generator predicts a VQ-VAE's codes directly. Each preset
 # names its target VQ-VAE via `dest_vqvae`. Three architectures are provided:
-#   - generator_256:     causal Transformer, fixed context window (targets vqvae_256)
-#   - generator_256_rnn: causal-conv / RNN stack (targets vqvae_256)
-#   - generator_512_lstm: stacked-LSTM stack (targets vqvae_512)
+#   - generator_256:          causal Transformer, fixed context window (targets vqvae_256)
+#   - generator_256_rnn:      causal-conv / RNN stack (targets vqvae_256)
+#   - generator_512_lstm:     stacked-LSTM stack (targets vqvae_512)
+#   - generator_512_transformer: causal Transformer (targets vqvae_512)
 GENERATOR_CONFIGS = {
     # Transformer-based generator (fixed context window with position embeddings)
     "generator_256": {
@@ -198,9 +199,23 @@ GENERATOR_CONFIGS = {
         "dest_vqvae": "vqvae_512",
         "embedding_dim": 32,
         "generator_layers": [
-            {"type": "lstm", "units": 768},
-            {"type": "lstm", "units": 768},
-            {"type": "lstm", "units": 768},
+            {"type": "lstm", "units": 1024},
+            {"type": "lstm", "units": 1024},
         ],
+    },
+    # Transformer generator targeting the 512x VQ-VAE. At 512x compression each
+    # code spans twice the audio of the 256x model, so a 1024-code window covers
+    # ~24s at 22.05kHz.
+    "generator_512_transformer": {
+        "type": "transformer",  # Use TransformerGenerator class
+        "dest_vqvae": "vqvae_512",  # Generates codes for 512x compression
+        "transformer": {
+            "max_seq_len": 512,  # Context window size
+            "embedding_dim": 512,  # Residual stream dimension
+            "num_layers": 16,  # Number of transformer layers
+            "num_heads": 16,  # Number of attention heads
+            "key_dim": 64,  # Dimension per attention head
+            "ff_dim": 1024,  # Feed-forward hidden dimension
+        },
     },
 }
