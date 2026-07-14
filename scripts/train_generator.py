@@ -111,8 +111,8 @@ def main():
                             'field; 0 disables)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
-    parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
-                       help='Initial learning rate (default: 1e-3)')
+    parser.add_argument('--learning-rate', '--lr', type=float, default=2.5e-4,
+                       help='Initial learning rate (default: 2.5e-4)')
     parser.add_argument('--decay-rate', type=float, default=0.9,
                        help='Multiplicative LR decay applied every --decay-steps (default: 0.9)')
     parser.add_argument('--decay-steps', type=int, default=None,
