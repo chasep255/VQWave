@@ -212,8 +212,8 @@ GENERATOR_CONFIGS = {
         "transformer": {
             "max_seq_len": 512,  # Context window size
             "embedding_dim": 512,  # Residual stream dimension
-            "num_layers": 16,  # Number of transformer layers
-            "num_heads": 16,  # Number of attention heads
+            "num_layers": 12,  # Number of transformer layers
+            "num_heads": 8,  # Number of attention heads
             "key_dim": 64,  # Dimension per attention head
             "ff_dim": 1024,  # Feed-forward hidden dimension
         },
