@@ -57,6 +57,9 @@ def main():
                        help='Number of steps for each decay (default: epoch_steps)')
     parser.add_argument('--grad-clip', type=float, default=1.0,
                        help='Global grad-norm clip (0 disables; default: 1.0)')
+    parser.add_argument('--warmup-steps', type=int, default=0,
+                       help='Adam moment warmup: run N steps to settle the optimizer '
+                            'moments (m, v) with weights frozen before training (default: 0, no warmup)')
     parser.add_argument('--bf16', action='store_true', default=False,
                        help='Use mixed_bfloat16 precision (Ampere+; half memory, no loss scaling)')
 
@@ -143,6 +146,18 @@ def main():
         grads = tape.gradient(loss, denoiser.trainable_weights)
         opt.apply_gradients(zip(grads, denoiser.trainable_weights))
         return loss
+
+    # Adam moment warmup: run N steps so the optimizer moment estimates (m, v)
+    # settle, restoring the weights after each step so they stay frozen. Real
+    # training then starts from a good gradient-variance estimate rather than
+    # Adam's high-variance cold start. (m, v and the step count carry over.)
+    if args.warmup_steps > 0:
+        print(f"Warming up Adam: {args.warmup_steps} steps (moments accumulate, weights frozen)...")
+        snapshot = [tf.identity(w) for w in denoiser.trainable_weights]
+        for _ in range(args.warmup_steps):
+            train_step(loader.random_batch())
+            for w, s in zip(denoiser.trainable_weights, snapshot):
+                w.assign(s)
 
     # Training loop
     epoch = args.start_epoch

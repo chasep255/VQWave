@@ -18,7 +18,7 @@ from vqwave.encoder import Encoder, CodebookManager
 from vqwave.generator import create_generator
 from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
 from vqwave.audio import AudioLoader
-from vqwave.util import AverageAccumulator, LRWarmupWrapper
+from vqwave.util import AverageAccumulator
 
 
 # GPU setup
@@ -28,7 +28,8 @@ for gpu in gpus:
 
 
 @tf.function
-def train_step(encoder, codebook, generator, optimizer, audio_batch, code_margin=0):
+def train_step(encoder, codebook, generator, optimizer, audio_batch, code_margin=0,
+               label_smoothing=0.0):
     """
     Single training step for the generator.
 
@@ -42,6 +43,10 @@ def train_step(encoder, codebook, generator, optimizer, audio_batch, code_margin
             'same'-padded encoder computes edge codes from zero-padding, so they
             are out-of-distribution; trimming them keeps the generator on codes
             with a full real-audio receptive field.
+        label_smoothing: Softens the one-hot target (spreads this mass uniformly
+            over the codebook) to curb overconfidence, which otherwise sharpens
+            the next-token distribution and degrades free-running samples. 0
+            disables it (and uses the cheaper sparse cross-entropy).
 
     Returns:
         dict with 'loss' and 'accuracy'
@@ -61,11 +66,21 @@ def train_step(encoder, codebook, generator, optimizer, audio_batch, code_margin
 
         logits = generator(input_codes, training=True)
 
-        loss = tf.reduce_mean(
-            tf.keras.losses.sparse_categorical_crossentropy(
-                target_codes_shifted, logits, from_logits=True
+        if label_smoothing > 0.0:
+            # Label smoothing needs one-hot targets; sparse CE has no such option.
+            soft_targets = tf.one_hot(target_codes_shifted, tf.shape(logits)[-1])
+            loss = tf.reduce_mean(
+                tf.keras.losses.categorical_crossentropy(
+                    soft_targets, logits, from_logits=True,
+                    label_smoothing=label_smoothing
+                )
             )
-        )
+        else:
+            loss = tf.reduce_mean(
+                tf.keras.losses.sparse_categorical_crossentropy(
+                    target_codes_shifted, logits, from_logits=True
+                )
+            )
 
         predictions = tf.argmax(logits, axis=-1)
         accuracy = tf.reduce_mean(
@@ -99,15 +114,20 @@ def main():
     parser.add_argument('--load-weights', action='store_true', default=False,
                        help='Load existing weights from output directory (default: False)')
     parser.add_argument('--warmup-steps', type=int, default=0,
-                       help='Number of warmup steps for learning rate (default: 0, no warmup)')
+                       help='Adam moment warmup: run N steps to settle the optimizer '
+                            'moments (m, v) with weights frozen before training (default: 0, no warmup)')
     parser.add_argument('--input-length', type=int, default=None,
                        help='Input audio length in samples (transformers default to '
                             '(max_seq_len + 1 + 2*code_margin) * compression; others '
                             'default to 65536 plus the margin)')
-    parser.add_argument('--code-margin', type=int, default=24,
+    parser.add_argument('--label-smoothing', type=float, default=0.1,
+                       help='Label smoothing for the next-code cross-entropy '
+                            '(default: 0.1; 0 disables). Curbs overconfidence that '
+                            'degrades free-running generation.')
+    parser.add_argument('--code-margin', type=int, default=32,
                        help='Codes dropped from each end after encoding to discard '
                             'the zero-padded boundary codes the same-padded encoder '
-                            'produces (default: 24, ~half the encoder receptive '
+                            'produces (default: 32, ~half the encoder receptive '
                             'field; 0 disables)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
@@ -211,15 +231,22 @@ def main():
     )
 
     start_step = args.start_epoch * args.epoch_steps
-    if args.warmup_steps > 0:
-        growth_rate = 1.0 / args.warmup_steps
-        lr = LRWarmupWrapper(base_lr, growth_rate=growth_rate, initial_step=start_step)
-        print(f"Using LR warmup for first {args.warmup_steps} steps from LR=0 (starting from step {start_step})")
-    else:
-        lr = base_lr
-
-    opt = tf.keras.optimizers.Adam(lr, clipnorm=1.0)
+    opt = tf.keras.optimizers.Adam(base_lr, clipnorm=1.0)
+    opt.build(generator.trainable_weights)
     opt.iterations.assign(start_step)
+
+    # Adam moment warmup: run N steps so the optimizer moment estimates (m, v)
+    # settle, restoring the weights after each step so they stay frozen. Real
+    # training then starts from a good gradient-variance estimate rather than
+    # Adam's high-variance cold start. (m, v and the step count carry over.)
+    if args.warmup_steps > 0:
+        print(f"Warming up Adam: {args.warmup_steps} steps (moments accumulate, weights frozen)...")
+        snapshot = [tf.identity(w) for w in generator.trainable_weights]
+        for _ in range(args.warmup_steps):
+            train_step(encoder, codebook, generator, opt, loader.random_batch(),
+                       args.code_margin, args.label_smoothing)
+            for w, s in zip(generator.trainable_weights, snapshot):
+                w.assign(s)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -233,7 +260,8 @@ def main():
 
         for step in range(args.epoch_steps):
             batch = loader.random_batch()
-            result = train_step(encoder, codebook, generator, opt, batch, args.code_margin)
+            result = train_step(encoder, codebook, generator, opt, batch,
+                                args.code_margin, args.label_smoothing)
 
             loss_acc.add(result['loss'])
             accuracy_acc.add(result['accuracy'])
