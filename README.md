@@ -2,42 +2,40 @@
 
 A Vector Quantized Variational Autoencoder (VQ-VAE) system for music generation.
 VQWave compresses audio 256×/512× into a sequence of discrete codes, learns an
-autoregressive generator over those codes to synthesize new sequences, and renders
-them back to audio with a conditional diffusion decoder.
+autoregressive generator over those codes to synthesize new sequences, and decodes
+them back to audio. The VQ-VAE is trained with a spectral reconstruction loss plus
+an adversarial (WGAN-GP) loss from a waveform critic.
 
 > **Note**: This project is under active development and may be incomplete. Some features and documentation are still being refined.
 
 ## Features
 
 - **256× / 512× Compression**: A VQ-VAE encodes audio into discrete codes. Two presets are provided (`vqvae_256`, `vqvae_512`).
-- **Reconstruction Training**: The VQ-VAE is trained with a spectral reconstruction loss (STFT/mel/MSE) plus a VQ commitment loss.
-- **Diffusion Rendering Decoder**: A separate, fully convolutional denoising-diffusion model renders a high-fidelity waveform from the codes at generation time (v-prediction, DDIM sampling). Length-agnostic — no attention or positional embeddings.
-- **Autoregressive Generation**: A single unconditional generator predicts the code sequence. Two interchangeable architectures are provided (causal Transformer or causal-conv/RNN stack).
+- **Adversarial (WGAN-GP) Training**: A waveform critic is trained alongside the VQ-VAE under the WGAN-GP objective, pushing reconstructions toward realistic audio. The spectral reconstruction loss (STFT/mel/MSE) plus the VQ commitment loss remain the anchor tying the codes to the input; the critic only adds realism. Enabled by default (`--adv-weight`).
+- **Autoregressive Generation**: A single unconditional generator predicts the code sequence. Interchangeable architectures are provided (causal Transformer or RNN / causal-conv stack).
+- **Optional Diffusion Decoder**: A separate, fully convolutional denoising-diffusion model can render a waveform from the codes at generation time (v-prediction, DDIM sampling). Length-agnostic — no attention or positional embeddings.
 - **Efficient Training**: Background-threaded random-crop audio loading for large datasets.
 - **Flexible Sampling**: Temperature, top-k, top-p, and greedy sampling.
 
 ## Architecture
 
-VQWave has three trained components: a **VQ-VAE** (encoder + codebook + a
-deterministic decoder), an autoregressive **generator** over the codes, and a
-**diffusion decoder** that renders audio from the codes.
+VQWave has two core trained components — a **VQ-VAE** (encoder + codebook +
+decoder, trained adversarially against a **critic**) and an autoregressive
+**generator** over the codes — plus an optional **diffusion decoder** that can
+render audio from the codes instead of the VQ-VAE decoder.
 
-**Training the VQ-VAE (reconstruction):**
+**Training the VQ-VAE (reconstruction + WGAN-GP):**
 ```
 Audio → Encoder → Codebook (quantize) → Decoder → Reconstructed audio
                                                         │
         Reconstruction loss (STFT/mel/MSE) + VQ commitment loss
+                              +
+        adversarial loss  ←  Critic (WGAN-GP: real vs reconstruction)
 ```
-The deterministic decoder is the "training" decoder: its only job is to shape the
-codebook. Final audio is rendered by the diffusion decoder.
-
-**Training the diffusion decoder (codes → waveform):**
-```
-Audio → (frozen) Encoder + Codebook → integer codes ─┐
-                                                      ▼
-        noisy waveform  →  conditional U-Net denoiser  →  v-prediction
-                          (codes injected at the code rate; time via FiLM)
-```
+The critic is training-only; it is never used at inference. It scores a waveform
+for realism, and the decoder is pushed to raise that score on its output. The
+reconstruction loss stays as the anchor tying codes to the input — see
+[Stage 1](#stage-1-train-the-vq-vae).
 
 **Generation:**
 ```
@@ -45,9 +43,17 @@ Generator (unconditional, autoregressive)
         ↓
    integer codes
         ↓
-   Diffusion decoder (DDIM sampling)   ← or the deterministic VQ-VAE decoder
+   VQ-VAE decoder   ← or, optionally, the diffusion decoder (DDIM sampling)
         ↓
    Audio Output
+```
+
+**Training the optional diffusion decoder (codes → waveform):**
+```
+Audio → (frozen) Encoder + Codebook → integer codes ─┐
+                                                      ▼
+        noisy waveform  →  conditional U-Net denoiser  →  v-prediction
+                          (codes injected at the code rate; time via FiLM)
 ```
 
 ### Components
@@ -55,19 +61,22 @@ Generator (unconditional, autoregressive)
 The VQ-VAE (`vqvae_256` / `vqvae_512`) uses:
 - **Encoder**: Convolutional layers that compress audio 256×/512× to latent vectors.
 - **Codebook**: Vector quantization with 2048 code vectors (32-dim each).
-- **Decoder**: Transposed convolutions that reconstruct audio from quantized codes (training decoder).
+- **Decoder**: Transposed convolutions that reconstruct audio from quantized codes.
+- **Critic** (training only, [`vqwave/critic.py`](vqwave/critic.py)): strided convolutions that reduce a waveform to a single unbounded score. It has no normalization layers by design — BatchNorm would couple examples within a batch and invalidate WGAN-GP's per-example gradient penalty. Configured per preset via the `critic` block in [`vqwave/config.py`](vqwave/config.py).
 
-The **diffusion decoder** (`diffusion_256` / `diffusion_512`) is a fully
+The generator predicts the next code autoregressively. Each preset names its
+target VQ-VAE via `dest_vqvae`:
+- `generator_256`: causal Transformer, fixed context window with learned position embeddings (targets `vqvae_256`).
+- `generator_256_rnn`: causal-conv / dilated residual stack, supports stateful step-by-step inference (targets `vqvae_256`).
+- `generator_512_transformer`: causal Transformer (targets `vqvae_512`).
+- `generator_512_lstm`: stacked LSTM, supports stateful inference (targets `vqvae_512`).
+
+The optional **diffusion decoder** (`diffusion_256` / `diffusion_512`) is a fully
 convolutional U-Net denoiser conditioned on the integer codes (embedded and
 concatenated at the code rate) and on the diffusion timestep (FiLM). It uses a
 continuous-time cosine schedule with v-prediction and deterministic DDIM
 sampling. Being fully convolutional, it runs on any audio length that is a
 multiple of the compression rate.
-
-The generator predicts the next code autoregressively. Two configs target the
-`vqvae_256` codes:
-- `generator_256`: causal Transformer with a fixed context window and learned position embeddings.
-- `generator_256_rnn`: causal-conv / dilated residual stack (supports stateful step-by-step inference).
 
 ## Installation
 
@@ -173,14 +182,14 @@ The script:
 
 ## Training
 
-Training has three stages: (1) train the VQ-VAE, (2) train the diffusion decoder
-that renders audio from the VQ-VAE's codes, and (3) train the autoregressive
-generator over the codes. Stages 2 and 3 both consume the frozen VQ-VAE and are
-independent of each other.
+Training has two required stages: (1) train the VQ-VAE (with its critic), and
+(2) train the autoregressive generator over the frozen VQ-VAE's codes.
+Optionally, a diffusion decoder can be trained as an alternative renderer; it
+also consumes the frozen VQ-VAE and is independent of the generator.
 
 ### Stage 1: Train the VQ-VAE
 
-Train the encoder/decoder/codebook using
+Train the encoder/decoder/codebook (and the critic) using
 [`scripts/train_vqvae.py`](scripts/train_vqvae.py):
 
 ```bash
@@ -188,23 +197,36 @@ python3 scripts/train_vqvae.py \
     --model vqvae_256 \
     --data-dir /path/to/audio/u16/files \
     [--batch-size 8] \
-    [--input-length 65536] \
+    [--tokens 256] \
     [--epoch-steps 10000] \
     [--learning-rate 1e-4] \
     [--decay-rate 0.9] \
     [--loss stft] \
     [--commit-weight 0.01] \
+    [--adv-weight 0.01] \
+    [--gp-weight 10.0] \
+    [--n-critic 5] \
+    [--critic-lr 1e-4] \
     [--output-dir weights] \
     [--bf16] \
     [--warmup-steps 1000]
 ```
 
 **Training Details:**
+- `--tokens N` sets the number of codebook tokens per training crop; the audio crop length is `tokens * compression_rate` (so 256 tokens = 65536 samples at 256×).
 - Reconstruction loss is selectable: multi-scale `stft` (default), `mel`, or `mse`.
 - The codebook restart mechanism prevents code collapse.
 - `--warmup-steps N` runs an Adam *moment* warmup: N steps that settle the optimizer moments (m, v) with weights frozen, so real training starts from a good gradient-variance estimate (this replaces the old LR-ramp warmup).
 - `--bf16` enables `mixed_bfloat16` (Ampere+; half the memory, no loss scaling).
-- Weights (encoder, decoder, codebook) are saved every epoch to `--output-dir` without epoch numbers, so training is always resumable.
+- Weights (encoder, decoder, codebook, and the critic when enabled) are saved every epoch to `--output-dir` without epoch numbers, so training is always resumable.
+
+**Adversarial (WGAN-GP) Training:**
+- `--adv-weight` (default `0.01`) weights the adversarial loss. `0` disables the GAN entirely — the critic is not built, trained, or saved, and training reduces to plain reconstruction + commitment.
+- `--n-critic` (default `5`) critic updates run per generator update, each on its own batch. This is the WGAN-GP paper value; because the reconstruction loss already anchors the codes here, `--n-critic 1` often suffices and is substantially faster (each critic step needs second-order gradients for the penalty).
+- `--gp-weight` (default `10.0`) weights the gradient penalty enforcing the critic's 1-Lipschitz constraint.
+- The critic's LR decay is scaled by `--n-critic` so that it and the generator anneal at the same rate per epoch (the critic's optimizer steps `n_critic` times more often).
+- The log reports `LR`/`CLR` (generator/critic learning rates), `W` (the Wasserstein estimate the critic maximizes) and `GP`. `GP` starts near 1 (gradient norms are ~0 at init) and should settle toward 0. If `W` runs away, raise `--n-critic` or lower `--critic-lr`.
+- The critic is **training-only** and is never loaded at inference, so reconstruction/generation are unaffected by these flags.
 
 **Resume Training:**
 ```bash
@@ -214,7 +236,44 @@ python3 scripts/train_vqvae.py \
     --start-epoch 5
 ```
 
-### Stage 2: Train the Diffusion Decoder
+### Stage 2: Train the Generator
+
+Train the autoregressive generator using
+[`scripts/train_generator.py`](scripts/train_generator.py). The VQ-VAE is frozen
+and only used to produce the target codes:
+
+```bash
+python3 scripts/train_generator.py \
+    --generator generator_256 \
+    --data-dir /path/to/audio/u16/files \
+    --vqvae-weights-dir weights \
+    [--batch-size 8] \
+    [--input-length 65536] \
+    [--epoch-steps 10000] \
+    [--learning-rate 1e-3] \
+    [--warmup-steps 1000]
+```
+
+Choose the architecture by config name:
+```bash
+# Transformer generator
+python3 scripts/train_generator.py --generator generator_256 --data-dir /path/to/data
+
+# RNN / causal-conv generator
+python3 scripts/train_generator.py --generator generator_256_rnn --data-dir /path/to/data
+```
+
+**Training Details:**
+- The generator predicts the next code with sparse categorical crossentropy loss.
+- The VQ-VAE encoder/codebook are frozen.
+- Gradient clipping (clipnorm=1.0) is applied automatically.
+- Weights are saved when the loss improves (best-loss tracking), without epoch numbers.
+
+### Optional: Train the Diffusion Decoder
+
+The VQ-VAE decoder already renders audio from the codes, so this stage is
+optional — it trains a *separate* renderer you can use instead, via
+`--diffusion` at generation time.
 
 Train the diffusion decoder using
 [`scripts/train_diffusion.py`](scripts/train_diffusion.py). The VQ-VAE encoder +
@@ -247,39 +306,6 @@ python3 scripts/train_diffusion.py \
 > **Note:** The diffusion decoder conditions on the codes your encoder currently
 > produces. Let the VQ-VAE converge first; if you retrain/change it afterward, the
 > codebook shifts and the diffusion decoder must be retrained.
-
-### Stage 3: Train the Generator
-
-Train the autoregressive generator using
-[`scripts/train_generator.py`](scripts/train_generator.py). The VQ-VAE is frozen
-and only used to produce the target codes:
-
-```bash
-python3 scripts/train_generator.py \
-    --generator generator_256 \
-    --data-dir /path/to/audio/u16/files \
-    --vqvae-weights-dir weights \
-    [--batch-size 8] \
-    [--input-length 65536] \
-    [--epoch-steps 10000] \
-    [--learning-rate 1e-3] \
-    [--warmup-steps 1000]
-```
-
-Choose the architecture by config name:
-```bash
-# Transformer generator
-python3 scripts/train_generator.py --generator generator_256 --data-dir /path/to/data
-
-# RNN / causal-conv generator
-python3 scripts/train_generator.py --generator generator_256_rnn --data-dir /path/to/data
-```
-
-**Training Details:**
-- The generator predicts the next code with sparse categorical crossentropy loss.
-- The VQ-VAE encoder/codebook are frozen.
-- Gradient clipping (clipnorm=1.0) is applied automatically.
-- Weights are saved when the loss improves (best-loss tracking), without epoch numbers.
 
 ## Generation
 
@@ -387,24 +413,32 @@ Model configurations are defined in [`vqwave/config.py`](vqwave/config.py).
 - `vqvae_256`: 256× compression, 2048 codes, 32-dim codebook vectors.
 - `vqvae_512`: 512× compression, 2048 codes, 32-dim codebook vectors.
 
-Each preset specifies the encoder layers (convolutional), decoder layers
-(transposed convolutional), compression rate (product of encoder strides), and
-codebook size/dimension.
+Each preset specifies `encoder_layers` (convolutional), `decoder_layers`
+(transposed convolutional), `compression_rate` (which must equal the product of
+the encoder strides), `num_codes` / `code_dim`, and a `critic` block — the
+WGAN-GP critic's strided conv stack (`channels`, `kernel`, `stride`, `alpha`),
+used only during training.
 
 ### Diffusion Config (`DIFFUSION_CONFIGS`)
 
 - `diffusion_256`: renders `vqvae_256` codes (256× upsample).
 - `diffusion_512`: renders `vqvae_512` codes (512× upsample).
 
-Each preset names its `dest_vqvae`, the code-embedding width (`cond_dim`), the
-diffusion-time embedding width (`time_dim`), the prediction target (`v` / `eps`),
-and `encoder_layers` / `decoder_layers` in the same style as the VQ-VAE. The
-encoder strides must multiply to the destination VQ-VAE's compression rate.
+Each preset names its `dest_vqvae`, the diffusion-time embedding width
+(`time_dim`), the prediction target (`prediction`: `v` / `eps`), the U-Net
+`stages` (one entry per resolution level, each with a `resample_kernel` for the
+strided down/up conv and a `conv_kernel` for the stride-1 refine), and a
+`middle` stack of pre-activated residual dilated blocks. The product of the
+stage strides must equal the destination VQ-VAE's compression rate.
 
 ### Generator Configs (`GENERATOR_CONFIGS`)
 
-- `generator_256`: Transformer, unconditional, generates 256× codes.
-- `generator_256_rnn`: Causal-conv / RNN stack, unconditional, generates 256× codes.
+Each preset names its target VQ-VAE via `dest_vqvae`:
+
+- `generator_256`: Transformer, unconditional, generates `vqvae_256` codes.
+- `generator_256_rnn`: Causal-conv / RNN stack, unconditional, generates `vqvae_256` codes.
+- `generator_512_transformer`: Transformer, unconditional, generates `vqvae_512` codes.
+- `generator_512_lstm`: Stacked LSTM, unconditional, generates `vqvae_512` codes.
 
 ## Project Structure
 
@@ -412,7 +446,8 @@ encoder strides must multiply to the destination VQ-VAE's compression rate.
 VQWave/
 ├── vqwave/                 # Core modules
 │   ├── encoder.py          # VQ-VAE encoder/decoder/codebook
-│   ├── diffusion.py        # Diffusion rendering decoder (codes -> waveform)
+│   ├── critic.py           # WGAN-GP critic + gradient penalty (training only)
+│   ├── diffusion.py        # Optional diffusion decoder (codes -> waveform)
 │   ├── generator.py        # Transformer and RNN/conv generators
 │   ├── audio.py            # Audio loading and processing
 │   ├── config.py           # Model configurations
@@ -420,7 +455,7 @@ VQWave/
 │   └── util.py             # Utilities (accumulators, LR warmup, etc.)
 ├── scripts/                # Training and generation scripts
 │   ├── prepare_audio.py    # Convert audio to .u16 format
-│   ├── train_vqvae.py      # Train VQ-VAE (reconstruction)
+│   ├── train_vqvae.py      # Train VQ-VAE (reconstruction + WGAN-GP)
 │   ├── train_diffusion.py  # Train the diffusion decoder
 │   ├── train_generator.py  # Train the generator
 │   ├── generate_audio.py   # Generate audio samples
@@ -440,7 +475,8 @@ VQWave/
 ### GPU Memory Issues
 
 - Reduce `--batch-size` if you run out of GPU memory
-- Reduce `--input-length` if needed
+- Shorten the training crop: `--tokens` for the VQ-VAE, `--input-length` for the generator / diffusion decoder
+- For the VQ-VAE, `--n-critic 1` cuts the per-step cost substantially (each critic update needs second-order gradients for the penalty), and `--adv-weight 0` disables the critic entirely
 
 ### Audio Processing Errors
 

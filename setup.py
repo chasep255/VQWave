@@ -5,7 +5,7 @@ from setuptools import setup, find_packages
 setup(
     name='vqwave',
     version='0.1.0',
-    description='VQWave - VQ-VAE codec with autoregressive code generation and diffusion decoding for music',
+    description='VQWave - VQ-VAE audio codec with WGAN-GP adversarial training and autoregressive code generation for music',
     packages=find_packages(),
     python_requires='>=3.8',
     install_requires=[
