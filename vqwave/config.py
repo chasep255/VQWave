@@ -45,6 +45,20 @@ ENCODER_CONFIGS = {
             # Final projection to a single-channel waveform (Flatten -> [batch, time]).
             {"channels": 1, "kernel": 9, "stride": 1, "activation": "tanh"},
         ],
+        # WGAN-GP critic (training only; see vqwave/critic.py). Scores a waveform
+        # for realism -- strided convs downsample to per-window scores that are
+        # averaged into one unbounded score per example. Deliberately has NO
+        # normalization layers: BatchNorm would couple examples in a batch and
+        # invalidate the per-example gradient penalty.
+        "critic": {
+            "layers": [
+                {"channels": 32,  "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 64,  "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 128, "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 256, "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 512, "kernel": 15, "stride": 4, "alpha": 0.2},
+            ],
+        },
     },
     "vqvae_512": {
         "compression_rate": 512,
@@ -79,6 +93,20 @@ ENCODER_CONFIGS = {
             # Final projection to a single-channel waveform (Flatten -> [batch, time]).
             {"channels": 1, "kernel": 9, "stride": 1, "activation": "tanh"},
         ],
+        # WGAN-GP critic (training only; see vqwave/critic.py). Scores a waveform
+        # for realism -- strided convs downsample to per-window scores that are
+        # averaged into one unbounded score per example. Deliberately has NO
+        # normalization layers: BatchNorm would couple examples in a batch and
+        # invalidate the per-example gradient penalty.
+        "critic": {
+            "layers": [
+                {"channels": 32,  "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 64,  "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 128, "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 256, "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 512, "kernel": 15, "stride": 4, "alpha": 0.2},
+            ],
+        },
     },
 }
 

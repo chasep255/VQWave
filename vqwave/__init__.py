@@ -11,6 +11,7 @@ from .layers import (
     Codebook,
 )
 from .encoder import Encoder, Decoder, CodebookManager
+from .critic import Critic, gradient_penalty
 from .config import ENCODER_CONFIGS, GENERATOR_CONFIGS, DIFFUSION_CONFIGS
 from .generator import Generator, TransformerGenerator, create_generator
 from .diffusion import Denoiser, normalize, denormalize
@@ -51,6 +52,9 @@ __all__ = [
     'Encoder',
     'Decoder',
     'CodebookManager',
+    # WGAN-GP critic
+    'Critic',
+    'gradient_penalty',
     'ENCODER_CONFIGS',
     'GENERATOR_CONFIGS',
     'DIFFUSION_CONFIGS',
