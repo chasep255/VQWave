@@ -8,10 +8,13 @@ SAMPLE_RATE = 22050
 # VQ-VAE configuration presets
 #
 # Two compression presets are provided (vqvae_256 and vqvae_512), trained with a
-# reconstruction loss (see scripts/train_vqvae.py). The deterministic decoder here
-# is the "training" decoder that shapes the codebook; a separate diffusion decoder
-# (see DIFFUSION_CONFIGS and vqwave/diffusion.py) renders higher-fidelity audio
-# from the codes at generation time.
+# reconstruction loss plus an optional WGAN-GP adversarial loss from the `critic`
+# stack below (see scripts/train_vqvae.py and vqwave/critic.py). The critic is
+# training-only and pushes the decoder toward realistic audio; the reconstruction
+# loss remains the anchor tying the codes to the input.
+#
+# A separate diffusion decoder (see DIFFUSION_CONFIGS and vqwave/diffusion.py) can
+# also render audio from the codes at generation time.
 ENCODER_CONFIGS = {
     "vqvae_256": {
         "compression_rate": 256,
@@ -45,6 +48,22 @@ ENCODER_CONFIGS = {
             # Final projection to a single-channel waveform (Flatten -> [batch, time]).
             {"channels": 1, "kernel": 9, "stride": 1, "activation": "tanh"},
         ],
+        # WGAN-GP critic (training only; see vqwave/critic.py). Scores a waveform
+        # for realism -- strided convs downsample to per-window scores that are
+        # averaged into one unbounded score per example. Deliberately has NO
+        # normalization layers: BatchNorm would couple examples in a batch and
+        # invalidate the per-example gradient penalty.
+        "critic": {
+            "layers": [
+                {"channels": 32,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 64,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 128, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 256, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 512, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 1024, "kernel": 12, "stride": 4, "alpha": 0.2},
+
+            ],
+        },
     },
     "vqvae_512": {
         "compression_rate": 512,
@@ -79,6 +98,20 @@ ENCODER_CONFIGS = {
             # Final projection to a single-channel waveform (Flatten -> [batch, time]).
             {"channels": 1, "kernel": 9, "stride": 1, "activation": "tanh"},
         ],
+        # WGAN-GP critic (training only; see vqwave/critic.py). Scores a waveform
+        # for realism -- strided convs downsample to per-window scores that are
+        # averaged into one unbounded score per example. Deliberately has NO
+        # normalization layers: BatchNorm would couple examples in a batch and
+        # invalidate the per-example gradient penalty.
+        "critic": {
+            "layers": [
+                {"channels": 32,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 64,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 128, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 256, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 512, "kernel": 12, "stride": 4, "alpha": 0.2},
+            ],
+        },
     },
 }
 

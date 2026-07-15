@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Train a VQ-VAE (vqvae_256 / vqvae_512) with a reconstruction loss.
+Train a VQ-VAE (vqvae_256 / vqvae_512), optionally with a WGAN-GP critic.
 
 The encoder, decoder, and codebook are trained with a reconstruction loss
-(STFT / mel / MSE) plus a VQ commitment loss. The deterministic decoder trained
-here shapes the codebook; the diffusion decoder (scripts/train_diffusion.py)
-renders higher-fidelity audio from the codes at generation time.
+(STFT / mel / MSE) plus a VQ commitment loss. With --adv-weight > 0 a critic
+(vqwave/critic.py) is trained alongside them under the WGAN-GP objective, and
+the decoder additionally maximizes the critic's score on its reconstruction.
+The reconstruction loss stays as the anchor that ties the codes to the input;
+the critic only adds realism.
 """
 
 import argparse
@@ -17,6 +19,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from vqwave.encoder import Encoder, Decoder, CodebookManager
+from vqwave.critic import Critic, gradient_penalty
 from vqwave.config import ENCODER_CONFIGS, SAMPLE_RATE
 from vqwave.audio import AudioLoader
 from vqwave.util import AverageAccumulator, CodebookRestarter
@@ -76,14 +79,50 @@ LOSS_FUNCTIONS = {
 
 
 @tf.function
-def train_step(encoder, decoder, codebook,
-               optimizer, restarter, r, loss_fn, commit_weight):
+def reconstruct(encoder, decoder, codebook, r):
+    """Encode -> quantize -> decode, with no gradient (used to feed the critic)."""
+    z_e = encoder(r, training=False)
+    z_q, _ = codebook(z_e, training=False)
+    return tf.stop_gradient(decoder(z_q, training=False))
+
+
+@tf.function
+def critic_step(encoder, decoder, codebook, critic, critic_optimizer, r, gp_weight):
     """
-    Single training step.
+    One WGAN-GP critic update.
+
+    The critic maximizes E[D(real)] - E[D(fake)], i.e. minimizes the negation,
+    plus the gradient penalty that enforces the 1-Lipschitz constraint. The
+    generator is frozen here (fake is detached).
+    """
+    fake = reconstruct(encoder, decoder, codebook, r)
+
+    with tf.GradientTape() as tape:
+        d_real = critic(r, training=True)
+        d_fake = critic(fake, training=True)
+        # Wasserstein estimate the critic is trying to maximize.
+        wasserstein = tf.reduce_mean(d_real) - tf.reduce_mean(d_fake)
+        gp = gradient_penalty(critic, r, fake)
+        d_loss = -wasserstein + gp_weight * gp
+
+    grads = tape.gradient(d_loss, critic.trainable_weights)
+    critic_optimizer.apply_gradients(zip(grads, critic.trainable_weights))
+
+    return {'d_loss': d_loss, 'wasserstein': wasserstein, 'gp': gp}
+
+
+@tf.function
+def train_step(encoder, decoder, codebook, critic,
+               optimizer, restarter, r, loss_fn, commit_weight, adv_weight):
+    """
+    Single generator (autoencoder) training step.
 
     Updates the autoencoder (encoder, decoder, codebook) with reconstruction +
-    commitment losses. The commit weight is passed as a float tensor to avoid
-    retracing when it is tuned.
+    commitment losses, plus an adversarial term that pushes the critic's score
+    on the reconstruction up. The reconstruction loss stays as the anchor that
+    ties the codes to the input; the critic only adds realism. Weights are
+    passed as float tensors to avoid retracing when tuned. `critic` may be None
+    to train without the adversarial term.
     """
     with tf.GradientTape() as tape:
         z_e = encoder(r, training=True)
@@ -97,7 +136,13 @@ def train_step(encoder, decoder, codebook,
         audio_loss = loss_fn(y, r)
         commit_loss = commit_weight * tf.reduce_mean(tf.square(z_e - z_q))
 
-        loss = audio_loss + commit_loss
+        if critic is not None:
+            # Generator wants the critic's score on its output to be high.
+            adv_loss = -tf.reduce_mean(critic(y, training=False))
+        else:
+            adv_loss = tf.zeros((), dtype=tf.float32)
+
+        loss = audio_loss + commit_loss + adv_weight * adv_loss
 
     weights = (decoder.trainable_weights +
                codebook.trainable_weights +
@@ -112,13 +157,15 @@ def train_step(encoder, decoder, codebook,
         'loss': loss,
         'audio_loss': audio_loss,
         'commit_loss': commit_loss,
+        'adv_loss': adv_loss,
         'used': num_used,
         'reset': num_reset,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train the 256x VQ-VAE with a reconstruction loss')
+    parser = argparse.ArgumentParser(
+        description='Train a VQ-VAE with a reconstruction loss and an optional WGAN-GP critic')
     parser.add_argument('--model', type=str, required=True,
                        choices=list(ENCODER_CONFIGS.keys()),
                        help=f'Model preset name (choices: {", ".join(ENCODER_CONFIGS.keys())})')
@@ -135,8 +182,9 @@ def main():
     parser.add_argument('--warmup-steps', type=int, default=0,
                        help='Adam moment warmup: run N steps to settle the optimizer '
                             'moments (m, v) with weights frozen before training (default: 0, no warmup)')
-    parser.add_argument('--input-length', type=int, default=2**16,
-                       help='Input audio length in samples (default: 65536)')
+    parser.add_argument('--tokens', type=int, default=256,
+                       help='Number of codebook tokens per training crop; the audio '
+                            'crop length is tokens * compression_rate (default: 256)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--code-reset-limit', type=int, default=256,
@@ -154,6 +202,20 @@ def main():
                        help='Use mixed_bfloat16 precision (Ampere+; half memory, no loss scaling)')
     parser.add_argument('--commit-weight', type=float, default=0.01,
                        help='Weight on the VQ commitment loss (default: 0.01)')
+    parser.add_argument('--adv-weight', type=float, default=0.01,
+                       help='Weight on the WGAN-GP adversarial loss (default: 0.01). '
+                            '>0 trains a critic alongside the VQ-VAE and pushes '
+                            'reconstructions toward realistic audio; the reconstruction '
+                            'loss stays as the anchor. 0 disables the critic entirely '
+                            '(not built, trained, or saved).')
+    parser.add_argument('--gp-weight', type=float, default=10.0,
+                       help='Gradient-penalty weight enforcing the critic 1-Lipschitz '
+                            'constraint (default: 10.0, the WGAN-GP paper value)')
+    parser.add_argument('--n-critic', type=int, default=5,
+                       help='Critic updates per generator update (default: 5, the '
+                            'WGAN-GP paper value)')
+    parser.add_argument('--critic-lr', type=float, default=1e-4,
+                       help='Critic learning rate (default: 1e-4)')
 
     args = parser.parse_args()
 
@@ -163,9 +225,17 @@ def main():
         print("Using mixed_bfloat16 precision")
 
     config = ENCODER_CONFIGS[args.model]
+
+    # Crop length in samples derives from the requested number of codebook tokens.
+    input_length = args.tokens * config["compression_rate"]
+    print(f"Training on {args.tokens} tokens/crop = {input_length} samples "
+          f"({input_length / SAMPLE_RATE:.2f}s at {config['compression_rate']}x)")
+
+    use_gan = args.adv_weight > 0.0
     encoder = Encoder(config)
     decoder = Decoder(config)
     codebook = CodebookManager(config)
+    critic = Critic(config) if use_gan else None
 
     print("Encoder:")
     encoder.summary()
@@ -173,15 +243,27 @@ def main():
     decoder.summary()
     print("\nCodebook:")
     codebook.summary()
+    if use_gan:
+        print("\nCritic (WGAN-GP):")
+        critic.summary()
+    else:
+        print("\nCritic: disabled (--adv-weight 0)")
 
     loss_fn = LOSS_FUNCTIONS[args.loss]
     loss_name = args.loss.upper()
     print(f"\nUsing {loss_name} reconstruction loss")
-    print(f"Loss weights: commit={args.commit_weight}")
+    print(f"Loss weights: commit={args.commit_weight} adv={args.adv_weight}")
+    if use_gan:
+        print(f"WGAN-GP: gp_weight={args.gp_weight} n_critic={args.n_critic} "
+              f"critic_lr={args.critic_lr}")
+
+    model_prefix = args.model
+    models = {'encoder': encoder, 'decoder': decoder, 'codebook': codebook}
+    if use_gan:
+        models['critic'] = critic
 
     # Load weights if resuming training or --load-weights flag is set
     if args.start_epoch > 0 or args.load_weights:
-        model_prefix = args.model
         encoder_path = os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5')
         decoder_path = os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5')
         codebook_path = os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5')
@@ -191,6 +273,14 @@ def main():
             encoder.load_weights(encoder_path)
             decoder.load_weights(decoder_path)
             codebook.load_weights(codebook_path)
+            # The critic is training-only; if it has no checkpoint yet (e.g.
+            # enabling the GAN on a previously non-adversarial run) start it fresh.
+            if use_gan:
+                critic_path = os.path.join(args.output_dir, f'{model_prefix}_critic.weights.h5')
+                if os.path.exists(critic_path):
+                    critic.load_weights(critic_path)
+                else:
+                    print("No critic checkpoint found; starting critic from scratch.")
             print("Weights loaded successfully.")
         else:
             missing = []
@@ -206,7 +296,7 @@ def main():
             )
 
     # Load dataset (background-threaded prefetcher; reads crops on demand)
-    loader = AudioLoader(args.data_dir, args.input_length, args.batch_size)
+    loader = AudioLoader(args.data_dir, input_length, args.batch_size)
     secs = loader.total_samples / SAMPLE_RATE
     print('%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
 
@@ -221,6 +311,24 @@ def main():
     opt.build(encoder.trainable_weights + decoder.trainable_weights + codebook.trainable_weights)
     opt.iterations.assign(start_step)
 
+    # WGAN-GP prescribes a low-momentum Adam for the critic: beta_1 near 0 keeps
+    # it from over-committing to a stale generator between updates.
+    #
+    # The critic takes n_critic updates per generator update, so its `iterations`
+    # advance n_critic times faster. Its decay_steps are scaled by the same factor
+    # so both learning rates decay at the SAME rate per epoch -- otherwise the
+    # critic would anneal n_critic times further along the schedule and the two
+    # would drift out of balance.
+    critic_opt = None
+    critic_lr = None
+    if use_gan:
+        critic_lr = tf.keras.optimizers.schedules.ExponentialDecay(
+            args.critic_lr, decay_steps * max(1, args.n_critic), args.decay_rate
+        )
+        critic_opt = tf.keras.optimizers.Adam(critic_lr, beta_1=0.5, beta_2=0.9)
+        critic_opt.build(critic.trainable_weights)
+        critic_opt.iterations.assign(start_step * max(1, args.n_critic))
+
     # Setup codebook restarter
     restarter = CodebookRestarter(
         codebook.codebook_layer,
@@ -231,6 +339,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     commit_weight_t = tf.constant(args.commit_weight, dtype=tf.float32)
+    adv_weight_t = tf.constant(args.adv_weight, dtype=tf.float32)
+    gp_weight_t = tf.constant(args.gp_weight, dtype=tf.float32)
 
     # Adam moment warmup: run N steps so the optimizer moment estimates (m, v)
     # settle, restoring all weights after each step so they stay frozen. Real
@@ -243,8 +353,9 @@ def main():
         snapshot = [tf.identity(w) for w in all_weights]
         for _ in range(args.warmup_steps):
             train_step(
-                encoder, decoder, codebook,
-                opt, restarter, loader.random_batch(), loss_fn, commit_weight_t
+                encoder, decoder, codebook, critic,
+                opt, restarter, loader.random_batch(), loss_fn, commit_weight_t,
+                adv_weight_t
             )
             for w, s in zip(all_weights, snapshot):
                 w.assign(s)
@@ -257,13 +368,26 @@ def main():
         loss_acc = AverageAccumulator()
         audio_loss_acc = AverageAccumulator()
         commit_loss_acc = AverageAccumulator()
+        wass_acc = AverageAccumulator()
+        gp_acc = AverageAccumulator()
         nreset = 0
 
         for step in range(args.epoch_steps):
+            # WGAN-GP: several critic updates per generator update, each on its
+            # own batch, so the critic stays near-optimal for the current decoder.
+            if use_gan:
+                for _ in range(args.n_critic):
+                    d_result = critic_step(
+                        encoder, decoder, codebook, critic, critic_opt,
+                        loader.random_batch(), gp_weight_t
+                    )
+                wass_acc.add(d_result['wasserstein'])
+                gp_acc.add(d_result['gp'])
+
             batch = loader.random_batch()
             result = train_step(
-                encoder, decoder, codebook,
-                opt, restarter, batch, loss_fn, commit_weight_t
+                encoder, decoder, codebook, critic,
+                opt, restarter, batch, loss_fn, commit_weight_t, adv_weight_t
             )
 
             loss_acc.add(result['loss'])
@@ -279,17 +403,22 @@ def main():
             else:
                 current_lr = float(lr_value)
 
-            print('Epoch=%04d Step=%04d Time=%s LR=%+.3e Loss=%+.3e (Audio=%+.3e Commit=%+.3e) Used=%05d Reset=%07d  ' %
+            if use_gan:
+                gan_str = 'CLR=%+.3e W=%+.3e GP=%+.3e ' % (
+                    float(critic_lr(critic_opt.iterations)),
+                    wass_acc.get(), gp_acc.get())
+            else:
+                gan_str = ''
+            print('Epoch=%04d Step=%04d Time=%s LR=%+.3e Loss=%+.3e (Audio=%+.3e Commit=%+.3e) %sUsed=%05d Reset=%07d  ' %
                   (epoch, step, etime, current_lr, loss_acc.get(),
-                   audio_loss_acc.get(), commit_loss_acc.get(),
+                   audio_loss_acc.get(), commit_loss_acc.get(), gan_str,
                    np.sum(result['used']), nreset), end='\r')
         print()
 
         # Save latest weights every epoch.
         print(f"Saving weights (Audio={audio_loss_acc.get():.4e})")
-        encoder.save_weights(os.path.join(args.output_dir, f'{model_prefix}_encoder.weights.h5'))
-        decoder.save_weights(os.path.join(args.output_dir, f'{model_prefix}_decoder.weights.h5'))
-        codebook.save_weights(os.path.join(args.output_dir, f'{model_prefix}_codebook.weights.h5'))
+        for name, model in models.items():
+            model.save_weights(os.path.join(args.output_dir, f'{model_prefix}_{name}.weights.h5'))
 
         epoch += 1
 
