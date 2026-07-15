@@ -8,10 +8,13 @@ SAMPLE_RATE = 22050
 # VQ-VAE configuration presets
 #
 # Two compression presets are provided (vqvae_256 and vqvae_512), trained with a
-# reconstruction loss (see scripts/train_vqvae.py). The deterministic decoder here
-# is the "training" decoder that shapes the codebook; a separate diffusion decoder
-# (see DIFFUSION_CONFIGS and vqwave/diffusion.py) renders higher-fidelity audio
-# from the codes at generation time.
+# reconstruction loss plus an optional WGAN-GP adversarial loss from the `critic`
+# stack below (see scripts/train_vqvae.py and vqwave/critic.py). The critic is
+# training-only and pushes the decoder toward realistic audio; the reconstruction
+# loss remains the anchor tying the codes to the input.
+#
+# A separate diffusion decoder (see DIFFUSION_CONFIGS and vqwave/diffusion.py) can
+# also render audio from the codes at generation time.
 ENCODER_CONFIGS = {
     "vqvae_256": {
         "compression_rate": 256,
@@ -52,11 +55,13 @@ ENCODER_CONFIGS = {
         # invalidate the per-example gradient penalty.
         "critic": {
             "layers": [
-                {"channels": 32,  "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 64,  "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 128, "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 256, "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 512, "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 32,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 64,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 128, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 256, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 512, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 1024, "kernel": 12, "stride": 4, "alpha": 0.2},
+
             ],
         },
     },
@@ -100,11 +105,11 @@ ENCODER_CONFIGS = {
         # invalidate the per-example gradient penalty.
         "critic": {
             "layers": [
-                {"channels": 32,  "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 64,  "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 128, "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 256, "kernel": 15, "stride": 4, "alpha": 0.2},
-                {"channels": 512, "kernel": 15, "stride": 4, "alpha": 0.2},
+                {"channels": 32,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 64,  "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 128, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 256, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 512, "kernel": 12, "stride": 4, "alpha": 0.2},
             ],
         },
     },

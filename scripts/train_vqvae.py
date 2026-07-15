@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Train a VQ-VAE (vqvae_256 / vqvae_512) with a reconstruction loss.
+Train a VQ-VAE (vqvae_256 / vqvae_512), optionally with a WGAN-GP critic.
 
 The encoder, decoder, and codebook are trained with a reconstruction loss
-(STFT / mel / MSE) plus a VQ commitment loss. The deterministic decoder trained
-here shapes the codebook; the diffusion decoder (scripts/train_diffusion.py)
-renders higher-fidelity audio from the codes at generation time.
+(STFT / mel / MSE) plus a VQ commitment loss. With --adv-weight > 0 a critic
+(vqwave/critic.py) is trained alongside them under the WGAN-GP objective, and
+the decoder additionally maximizes the critic's score on its reconstruction.
+The reconstruction loss stays as the anchor that ties the codes to the input;
+the critic only adds realism.
 """
 
 import argparse
@@ -162,7 +164,8 @@ def train_step(encoder, decoder, codebook, critic,
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train the 256x VQ-VAE with a reconstruction loss')
+    parser = argparse.ArgumentParser(
+        description='Train a VQ-VAE with a reconstruction loss and an optional WGAN-GP critic')
     parser.add_argument('--model', type=str, required=True,
                        choices=list(ENCODER_CONFIGS.keys()),
                        help=f'Model preset name (choices: {", ".join(ENCODER_CONFIGS.keys())})')
@@ -179,8 +182,9 @@ def main():
     parser.add_argument('--warmup-steps', type=int, default=0,
                        help='Adam moment warmup: run N steps to settle the optimizer '
                             'moments (m, v) with weights frozen before training (default: 0, no warmup)')
-    parser.add_argument('--input-length', type=int, default=2**16,
-                       help='Input audio length in samples (default: 65536)')
+    parser.add_argument('--tokens', type=int, default=256,
+                       help='Number of codebook tokens per training crop; the audio '
+                            'crop length is tokens * compression_rate (default: 256)')
     parser.add_argument('--epoch-steps', '--steps', type=int, default=10000,
                        help='Number of training steps per epoch (default: 10000)')
     parser.add_argument('--code-reset-limit', type=int, default=256,
@@ -198,11 +202,12 @@ def main():
                        help='Use mixed_bfloat16 precision (Ampere+; half memory, no loss scaling)')
     parser.add_argument('--commit-weight', type=float, default=0.01,
                        help='Weight on the VQ commitment loss (default: 0.01)')
-    parser.add_argument('--adv-weight', type=float, default=0.0,
-                       help='Weight on the WGAN-GP adversarial loss (default: 0.0, '
-                            'disabled). >0 trains a critic alongside the VQ-VAE and '
-                            'pushes reconstructions toward realistic audio. The '
-                            'reconstruction loss stays as the anchor.')
+    parser.add_argument('--adv-weight', type=float, default=0.01,
+                       help='Weight on the WGAN-GP adversarial loss (default: 0.01). '
+                            '>0 trains a critic alongside the VQ-VAE and pushes '
+                            'reconstructions toward realistic audio; the reconstruction '
+                            'loss stays as the anchor. 0 disables the critic entirely '
+                            '(not built, trained, or saved).')
     parser.add_argument('--gp-weight', type=float, default=10.0,
                        help='Gradient-penalty weight enforcing the critic 1-Lipschitz '
                             'constraint (default: 10.0, the WGAN-GP paper value)')
@@ -220,6 +225,12 @@ def main():
         print("Using mixed_bfloat16 precision")
 
     config = ENCODER_CONFIGS[args.model]
+
+    # Crop length in samples derives from the requested number of codebook tokens.
+    input_length = args.tokens * config["compression_rate"]
+    print(f"Training on {args.tokens} tokens/crop = {input_length} samples "
+          f"({input_length / SAMPLE_RATE:.2f}s at {config['compression_rate']}x)")
+
     use_gan = args.adv_weight > 0.0
     encoder = Encoder(config)
     decoder = Decoder(config)
@@ -285,7 +296,7 @@ def main():
             )
 
     # Load dataset (background-threaded prefetcher; reads crops on demand)
-    loader = AudioLoader(args.data_dir, args.input_length, args.batch_size)
+    loader = AudioLoader(args.data_dir, input_length, args.batch_size)
     secs = loader.total_samples / SAMPLE_RATE
     print('%02d:%02d:%02d of training audio loaded.' % (secs // 3600, (secs // 60) % 60, secs % 60))
 
@@ -302,10 +313,21 @@ def main():
 
     # WGAN-GP prescribes a low-momentum Adam for the critic: beta_1 near 0 keeps
     # it from over-committing to a stale generator between updates.
+    #
+    # The critic takes n_critic updates per generator update, so its `iterations`
+    # advance n_critic times faster. Its decay_steps are scaled by the same factor
+    # so both learning rates decay at the SAME rate per epoch -- otherwise the
+    # critic would anneal n_critic times further along the schedule and the two
+    # would drift out of balance.
     critic_opt = None
+    critic_lr = None
     if use_gan:
-        critic_opt = tf.keras.optimizers.Adam(args.critic_lr, beta_1=0.5, beta_2=0.9)
+        critic_lr = tf.keras.optimizers.schedules.ExponentialDecay(
+            args.critic_lr, decay_steps * max(1, args.n_critic), args.decay_rate
+        )
+        critic_opt = tf.keras.optimizers.Adam(critic_lr, beta_1=0.5, beta_2=0.9)
         critic_opt.build(critic.trainable_weights)
+        critic_opt.iterations.assign(start_step * max(1, args.n_critic))
 
     # Setup codebook restarter
     restarter = CodebookRestarter(
@@ -381,8 +403,12 @@ def main():
             else:
                 current_lr = float(lr_value)
 
-            gan_str = ('W=%+.3e GP=%+.3e ' % (wass_acc.get(), gp_acc.get())
-                       if use_gan else '')
+            if use_gan:
+                gan_str = 'CLR=%+.3e W=%+.3e GP=%+.3e ' % (
+                    float(critic_lr(critic_opt.iterations)),
+                    wass_acc.get(), gp_acc.get())
+            else:
+                gan_str = ''
             print('Epoch=%04d Step=%04d Time=%s LR=%+.3e Loss=%+.3e (Audio=%+.3e Commit=%+.3e) %sUsed=%05d Reset=%07d  ' %
                   (epoch, step, etime, current_lr, loss_acc.get(),
                    audio_loss_acc.get(), commit_loss_acc.get(), gan_str,
