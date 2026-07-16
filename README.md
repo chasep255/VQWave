@@ -13,7 +13,6 @@ an adversarial (WGAN-GP) loss from a waveform critic.
 - **256× / 512× Compression**: A VQ-VAE encodes audio into discrete codes. Two presets are provided (`vqvae_256`, `vqvae_512`).
 - **Adversarial (WGAN-GP) Training**: A waveform critic is trained alongside the VQ-VAE under the WGAN-GP objective, pushing reconstructions toward realistic audio. The spectral reconstruction loss (STFT/mel/MSE) plus the VQ commitment loss remain the anchor tying the codes to the input; the critic only adds realism. Enabled by default (`--adv-weight`).
 - **Autoregressive Generation**: A single unconditional generator predicts the code sequence. Interchangeable architectures are provided (causal Transformer or RNN / causal-conv stack).
-- **Optional Diffusion Decoder**: A separate, fully convolutional denoising-diffusion model can render a waveform from the codes at generation time (v-prediction, DDIM sampling). Length-agnostic — no attention or positional embeddings.
 - **Efficient Training**: Background-threaded random-crop audio loading for large datasets.
 - **Flexible Sampling**: Temperature, top-k, top-p, and greedy sampling.
 
@@ -21,8 +20,7 @@ an adversarial (WGAN-GP) loss from a waveform critic.
 
 VQWave has two core trained components — a **VQ-VAE** (encoder + codebook +
 decoder, trained adversarially against a **critic**) and an autoregressive
-**generator** over the codes — plus an optional **diffusion decoder** that can
-render audio from the codes instead of the VQ-VAE decoder.
+**generator** over the codes.
 
 **Training the VQ-VAE (reconstruction + WGAN-GP):**
 ```
@@ -43,17 +41,9 @@ Generator (unconditional, autoregressive)
         ↓
    integer codes
         ↓
-   VQ-VAE decoder   ← or, optionally, the diffusion decoder (DDIM sampling)
+   VQ-VAE decoder
         ↓
    Audio Output
-```
-
-**Training the optional diffusion decoder (codes → waveform):**
-```
-Audio → (frozen) Encoder + Codebook → integer codes ─┐
-                                                      ▼
-        noisy waveform  →  conditional U-Net denoiser  →  v-prediction
-                          (codes injected at the code rate; time via FiLM)
 ```
 
 ### Components
@@ -70,13 +60,6 @@ target VQ-VAE via `dest_vqvae`:
 - `generator_256_rnn`: causal-conv / dilated residual stack, supports stateful step-by-step inference (targets `vqvae_256`).
 - `generator_512_transformer`: causal Transformer (targets `vqvae_512`).
 - `generator_512_lstm`: stacked LSTM, supports stateful inference (targets `vqvae_512`).
-
-The optional **diffusion decoder** (`diffusion_256` / `diffusion_512`) is a fully
-convolutional U-Net denoiser conditioned on the integer codes (embedded and
-concatenated at the code rate) and on the diffusion timestep (FiLM). It uses a
-continuous-time cosine schedule with v-prediction and deterministic DDIM
-sampling. Being fully convolutional, it runs on any audio length that is a
-multiple of the compression rate.
 
 ## Installation
 
@@ -182,10 +165,8 @@ The script:
 
 ## Training
 
-Training has two required stages: (1) train the VQ-VAE (with its critic), and
-(2) train the autoregressive generator over the frozen VQ-VAE's codes.
-Optionally, a diffusion decoder can be trained as an alternative renderer; it
-also consumes the frozen VQ-VAE and is independent of the generator.
+Training has two stages: (1) train the VQ-VAE (with its critic), and (2) train
+the autoregressive generator over the frozen VQ-VAE's codes.
 
 ### Stage 1: Train the VQ-VAE
 
@@ -269,44 +250,6 @@ python3 scripts/train_generator.py --generator generator_256_rnn --data-dir /pat
 - Gradient clipping (clipnorm=1.0) is applied automatically.
 - Weights are saved when the loss improves (best-loss tracking), without epoch numbers.
 
-### Optional: Train the Diffusion Decoder
-
-The VQ-VAE decoder already renders audio from the codes, so this stage is
-optional — it trains a *separate* renderer you can use instead, via
-`--diffusion` at generation time.
-
-Train the diffusion decoder using
-[`scripts/train_diffusion.py`](scripts/train_diffusion.py). The VQ-VAE encoder +
-codebook are frozen and used only to tokenize audio into integer codes; the
-denoiser learns to render a waveform from those codes:
-
-```bash
-python3 scripts/train_diffusion.py \
-    --diffusion diffusion_512 \
-    --data-dir /path/to/audio/u16/files \
-    --vqvae-weights-dir weights \
-    [--batch-size 8] \
-    [--input-length 65536] \
-    [--epoch-steps 10000] \
-    [--learning-rate 1e-4] \
-    [--decay-rate 0.9] \
-    [--grad-clip 1.0] \
-    [--output-dir weights] \
-    [--bf16]
-```
-
-**Training Details:**
-- Pick the `--diffusion` preset whose `dest_vqvae` matches your trained VQ-VAE (`diffusion_256` → `vqvae_256`, `diffusion_512` → `vqvae_512`).
-- `--input-length` must be a multiple of the compression rate (the script enforces this).
-- Trains with v-prediction (MSE against the v-target) on a continuous-time cosine schedule; timesteps are stratified per batch.
-- Waveforms are companded with a mild mu-law (`NORM_MU`, `NORM_STD` in [`vqwave/diffusion.py`](vqwave/diffusion.py)) so the data marginal matches the Gaussian diffusion prior. Re-derive these constants for a very different dataset.
-- Weights are saved every epoch as `{diffusion}_denoiser.weights.h5`, without epoch numbers, so training is resumable (`--start-epoch N` or `--load-weights`).
-- The deterministic VQ-VAE decoder is **not** used here — only the encoder + codebook.
-
-> **Note:** The diffusion decoder conditions on the codes your encoder currently
-> produces. Let the VQ-VAE converge first; if you retrain/change it afterward, the
-> codebook shifts and the diffusion decoder must be retrained.
-
 ## Generation
 
 Generate audio using a trained generator + VQ-VAE with
@@ -369,41 +312,6 @@ python3 scripts/test_vqvae.py \
 - `--plot`: Plot original vs. reconstructed waveforms
 - `--no-gpu`: Run on CPU instead of GPU
 
-## Testing the Diffusion Decoder
-
-Render an audio file through its codes with the diffusion decoder using
-[`scripts/test_diffusion.py`](scripts/test_diffusion.py). This encodes real audio
-to codes with the frozen VQ-VAE, then samples a waveform from those codes — the
-same rendering path used at generation time, so it isolates the diffusion
-decoder's quality:
-
-```bash
-python3 scripts/test_diffusion.py \
-    --audio /path/to/audio/file.mp3 \
-    --diffusion diffusion_512 \
-    [--weights-dir weights] \
-    [--steps 200] \
-    [--eta 0.0] \
-    [--output rendered.wav] \
-    [--max-length 30] \
-    [--plot] \
-    [--no-gpu]
-```
-
-**Arguments:**
-- `--audio`: Input audio file (mp3, wav, m4a, etc.)
-- `--diffusion`: Diffusion config to test (`diffusion_256` or `diffusion_512`)
-- `--weights-dir`: Directory with the VQ-VAE and diffusion weights (default: `weights`)
-- `--steps`: Number of DDIM sampling steps (default: 200; more = slower, cleaner)
-- `--eta`: DDIM stochasticity (0 = deterministic, up to 1 = ancestral)
-- `--output`: Save rendered audio to file (default: plays audio)
-- `--max-length`: Maximum audio length in seconds (auto-trimmed to a whole number of codes)
-- `--plot`: Plot original vs. rendered waveforms
-- `--no-gpu`: Run on CPU instead of GPU
-
-Compare this against `test_vqvae.py` on the same clip: the codes are identical,
-so any difference is purely deterministic-decoder vs. diffusion-decoder rendering.
-
 ## Configuration
 
 Model configurations are defined in [`vqwave/config.py`](vqwave/config.py).
@@ -418,18 +326,6 @@ Each preset specifies `encoder_layers` (convolutional), `decoder_layers`
 the encoder strides), `num_codes` / `code_dim`, and a `critic` block — the
 WGAN-GP critic's strided conv stack (`channels`, `kernel`, `stride`, `alpha`),
 used only during training.
-
-### Diffusion Config (`DIFFUSION_CONFIGS`)
-
-- `diffusion_256`: renders `vqvae_256` codes (256× upsample).
-- `diffusion_512`: renders `vqvae_512` codes (512× upsample).
-
-Each preset names its `dest_vqvae`, the diffusion-time embedding width
-(`time_dim`), the prediction target (`prediction`: `v` / `eps`), the U-Net
-`stages` (one entry per resolution level, each with a `resample_kernel` for the
-strided down/up conv and a `conv_kernel` for the stride-1 refine), and a
-`middle` stack of pre-activated residual dilated blocks. The product of the
-stage strides must equal the destination VQ-VAE's compression rate.
 
 ### Generator Configs (`GENERATOR_CONFIGS`)
 
@@ -447,7 +343,6 @@ VQWave/
 ├── vqwave/                 # Core modules
 │   ├── encoder.py          # VQ-VAE encoder/decoder/codebook
 │   ├── critic.py           # WGAN-GP critic + gradient penalty (training only)
-│   ├── diffusion.py        # Optional diffusion decoder (codes -> waveform)
 │   ├── generator.py        # Transformer and RNN/conv generators
 │   ├── audio.py            # Audio loading and processing
 │   ├── config.py           # Model configurations
@@ -456,16 +351,13 @@ VQWave/
 ├── scripts/                # Training and generation scripts
 │   ├── prepare_audio.py    # Convert audio to .u16 format
 │   ├── train_vqvae.py      # Train VQ-VAE (reconstruction + WGAN-GP)
-│   ├── train_diffusion.py  # Train the diffusion decoder
 │   ├── train_generator.py  # Train the generator
 │   ├── generate_audio.py   # Generate audio samples
-│   ├── test_vqvae.py       # Test VQ-VAE reconstruction
-│   └── test_diffusion.py   # Test the diffusion decoder
+│   └── test_vqvae.py       # Test VQ-VAE reconstruction
 ├── weights/                # Trained model weights
 │   ├── vqvae_512_encoder.weights.h5
 │   ├── vqvae_512_decoder.weights.h5
 │   ├── vqvae_512_codebook.weights.h5
-│   ├── diffusion_512_denoiser.weights.h5
 │   └── generator_256_generator.weights.h5
 └── setup.py                # Package configuration
 ```
@@ -475,7 +367,7 @@ VQWave/
 ### GPU Memory Issues
 
 - Reduce `--batch-size` if you run out of GPU memory
-- Shorten the training crop: `--tokens` for the VQ-VAE, `--input-length` for the generator / diffusion decoder
+- Shorten the training crop: `--tokens` for the VQ-VAE, `--input-length` for the generator
 - For the VQ-VAE, `--n-critic 1` cuts the per-step cost substantially (each critic update needs second-order gradients for the penalty), and `--adv-weight 0` disables the critic entirely
 
 ### Audio Processing Errors
@@ -506,16 +398,10 @@ python3 scripts/train_vqvae.py --model vqvae_512 --data-dir /path/to/training/da
 # Optional: Test VQ-VAE reconstruction
 python3 scripts/test_vqvae.py --audio /path/to/test/audio.mp3 --model vqvae_512 --output reconstructed.wav
 
-# 3. Train the diffusion decoder (VQ-VAE encoder + codebook frozen)
-python3 scripts/train_diffusion.py --diffusion diffusion_512 --data-dir /path/to/training/data
-
-# Optional: Render a clip through the codes with the diffusion decoder
-python3 scripts/test_diffusion.py --audio /path/to/test/audio.mp3 --diffusion diffusion_512 --output rendered.wav
-
-# 4. Train the generator (VQ-VAE is frozen)
+# 3. Train the generator (VQ-VAE is frozen)
 python3 scripts/train_generator.py --generator generator_256 --data-dir /path/to/training/data
 
-# 5. Generate audio
+# 4. Generate audio
 python3 scripts/generate_audio.py \
     --generator generator_256 \
     --length 512 \

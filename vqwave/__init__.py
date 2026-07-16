@@ -12,9 +12,8 @@ from .layers import (
 )
 from .encoder import Encoder, Decoder, CodebookManager
 from .critic import Critic, gradient_penalty
-from .config import ENCODER_CONFIGS, GENERATOR_CONFIGS, DIFFUSION_CONFIGS
+from .config import ENCODER_CONFIGS, GENERATOR_CONFIGS
 from .generator import Generator, TransformerGenerator, create_generator
-from .diffusion import Denoiser, normalize, denormalize
 
 from .audio import (
     u16_to_f32,
@@ -57,15 +56,10 @@ __all__ = [
     'gradient_penalty',
     'ENCODER_CONFIGS',
     'GENERATOR_CONFIGS',
-    'DIFFUSION_CONFIGS',
     # Generator
     'Generator',
     'TransformerGenerator',
     'create_generator',
-    # Diffusion decoder
-    'Denoiser',
-    'normalize',
-    'denormalize',
     # Audio utilities
     'u16_to_f32',
     'f32_to_u16',

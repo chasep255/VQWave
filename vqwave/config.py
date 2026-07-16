@@ -13,9 +13,6 @@ SAMPLE_RATE = 22050
 # training-only and pushes the decoder toward realistic audio; the reconstruction
 # loss remains the anchor tying the codes to the input.
 #
-# A separate diffusion decoder (see DIFFUSION_CONFIGS and vqwave/diffusion.py) can
-# also render audio from the codes at generation time.
-#
 # Encoder/decoder layers take an optional `dilation` (default 1) to widen the
 # receptive field without extra parameters. Only valid on stride-1, non-transpose
 # convs -- i.e. the frame-rate refinement stacks.
@@ -138,72 +135,6 @@ ENCODER_CONFIGS = {
                 {"channels": 1024, "kernel": 9, "stride": 1, "alpha": 0.2},
             ],
         },
-    },
-}
-
-# Diffusion decoder configuration presets
-#
-# A conditional denoising-diffusion model that refines the deterministic VQ-VAE
-# reconstruction. The decoded waveform is concatenated channel-wise with the noisy
-# input, so the conditioning is present at full resolution and flows through every
-# level via the skips -- much stronger than injecting codes at the bottleneck.
-#
-# Fully convolutional -- no attention or positional embeddings -- so it runs on
-# arbitrary-length audio (any multiple of compression_rate). A WaveDiffuse-style
-# U-Net contracts then expands:
-#   - `stages`: one entry per resolution level, each with two per-stage kernels --
-#     `resample_kernel` (the strided down/up conv) and `conv_kernel` (the stride-1
-#     refine / skip-fuse conv). Each level is TWO convs and contributes ONE skip
-#     connection. The product of the stage strides must equal the destination
-#     VQ-VAE's compression_rate.
-#   - `middle`: a stack of pre-activated residual dilated blocks (projected into a
-#     shared residual width) that widens the receptive field. No attention.
-# Every conv is FiLM-conditioned on the diffusion time. Upsampling is a transposed
-# conv (keep resample_kernel divisible by stride to avoid checkerboard). A final
-# 1-channel projection to the (v / eps) prediction is appended automatically.
-DIFFUSION_CONFIGS = {
-    "diffusion_256": {
-        "dest_vqvae": "vqvae_256",         # refines this VQ-VAE's reconstruction (256x)
-        "time_dim": 256,                   # diffusion-time embedding width
-        "prediction": "v",                 # "v" (recommended) or "eps"
-        # Contract/expand levels; product of strides == 256. Two convs + one skip
-        # each: resample_kernel (strided down/up) and conv_kernel (stride-1 refine).
-        "stages": [
-            {"channels": 64,  "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-            {"channels": 128, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-            {"channels": 256, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-            {"channels": 512, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-        ],
-        # Middle: pre-activated residual dilated blocks.
-        "middle": [
-            {"channels": 512, "kernel": 3, "dilation": 1},
-            {"channels": 512, "kernel": 3, "dilation": 2},
-            {"channels": 512, "kernel": 3, "dilation": 4},
-            {"channels": 512, "kernel": 3, "dilation": 8},
-        ],
-    },
-    "diffusion_512": {
-        "dest_vqvae": "vqvae_512",         # refines this VQ-VAE's reconstruction (512x)
-        "time_dim": 32,
-        "prediction": "v",
-        # Contract/expand levels; product of strides == 512. Two convs + one skip
-        # each: resample_kernel (strided down/up) and conv_kernel (stride-1 refine).
-        "stages": [
-            {"channels": 32,  "stride": 2, "resample_kernel": 6,  "conv_kernel": 9},
-            {"channels": 64,  "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-            {"channels": 128, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-            {"channels": 256, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-            {"channels": 512, "stride": 4, "resample_kernel": 12, "conv_kernel": 9},
-        ],
-        "middle": [
-            {"channels": 512, "kernel": 3, "dilation": 1},
-            {"channels": 512, "kernel": 3, "dilation": 2},
-            {"channels": 512, "kernel": 3, "dilation": 4},
-            {"channels": 512, "kernel": 3, "dilation": 8},
-            {"channels": 512, "kernel": 3, "dilation": 16},
-            {"channels": 512, "kernel": 3, "dilation": 32},
-
-        ],
     },
 }
 

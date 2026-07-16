@@ -4,8 +4,6 @@ Generate audio from a trained generator + VQ-VAE.
 
 A single unconditional generator produces a sequence of codes, which the VQ-VAE
 decoder turns into a waveform. Supports temperature / top-k / top-p sampling.
-Optionally (--diffusion) the deterministic reconstruction is refined by the
-diffusion decoder for higher fidelity.
 """
 
 import argparse
@@ -17,8 +15,7 @@ import tensorflow as tf
 
 from vqwave.encoder import Decoder, CodebookManager
 from vqwave.generator import create_generator, TransformerGenerator
-from vqwave.diffusion import Denoiser, normalize, denormalize
-from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, DIFFUSION_CONFIGS, SAMPLE_RATE
+from vqwave.config import ENCODER_CONFIGS, GENERATOR_CONFIGS, SAMPLE_RATE
 
 # Default values for generation parameters
 DEFAULT_TEMPERATURE = 0.9
@@ -302,16 +299,6 @@ Examples:
                        help='Directory with VQ-VAE weights (default: weights)')
     parser.add_argument('--generator-weights-dir', type=str, default='weights',
                        help='Directory with generator weights (default: weights)')
-    parser.add_argument('--diffusion', type=str, default=None,
-                       choices=list(DIFFUSION_CONFIGS.keys()),
-                       help='Refine the decoded audio with this diffusion decoder (optional). '
-                            'Its dest_vqvae must match the generator. Omit for the deterministic decoder only.')
-    parser.add_argument('--diffusion-weights-dir', type=str, default='weights',
-                       help='Directory with diffusion weights (default: weights)')
-    parser.add_argument('--steps', type=int, default=50,
-                       help='DDIM sampling steps for the diffusion decoder (default: 50)')
-    parser.add_argument('--eta', type=float, default=0.25,
-                       help='DDIM stochasticity: 0 = deterministic, up to 1 = ancestral (default: 0.25)')
     parser.add_argument('--output', type=str, default=None,
                        help='Save audio to file (optional, otherwise plays)')
     parser.add_argument('--no-gpu', action='store_true',
@@ -361,21 +348,6 @@ Examples:
     )
     print(f"Loaded generator: {args.generator}")
 
-    # Optional diffusion decoder to refine the deterministic reconstruction.
-    denoiser = None
-    if args.diffusion:
-        diff_config = DIFFUSION_CONFIGS[args.diffusion]
-        if diff_config['dest_vqvae'] != dest_vqvae_key:
-            raise ValueError(
-                f"Diffusion '{args.diffusion}' targets {diff_config['dest_vqvae']}, but the "
-                f"generator targets {dest_vqvae_key}; they must match."
-            )
-        denoiser = Denoiser(diff_config)
-        denoiser.load_weights(
-            os.path.join(args.diffusion_weights_dir, f'{args.diffusion}_denoiser.weights.h5')
-        )
-        print(f"Loaded diffusion decoder: {args.diffusion} ({args.steps} DDIM steps, eta={args.eta})")
-
     num_codes = args.length
     audio_length = num_codes * compression
     print(f"\nGenerating {num_codes} codes ({compression}x compression)")
@@ -395,20 +367,13 @@ Examples:
     )
     print(f"Generated {len(codes)} codes, unique: {len(set(codes))}")
 
-    # Decode codes to the deterministic reconstruction.
+    # Decode codes to the waveform.
     print(f"\nDecoding {len(codes)} codes to audio...")
     codes_tensor = tf.expand_dims(tf.constant(codes, dtype=tf.int32), 0)
     code_vectors = codebook.gather(codes_tensor)
     decoded = decoder(code_vectors, training=False)  # (1, L)
 
-    if denoiser is not None:
-        # Refine the deterministic reconstruction with the diffusion decoder.
-        print(f"Refining with diffusion decoder ({args.steps} DDIM steps)...")
-        cond = normalize(decoded)
-        refined = denoiser.generate(cond, nsteps=args.steps, eta=args.eta, progress=True)
-        audio = denormalize(refined)[0].numpy()
-    else:
-        audio = np.clip(decoded[0].numpy(), -1.0, 1.0)
+    audio = np.clip(decoded[0].numpy(), -1.0, 1.0)
     audio = audio[:audio_length]
 
     print(f"Generated audio: {len(audio)} samples ({len(audio) / SAMPLE_RATE:.2f} seconds)")
