@@ -22,7 +22,8 @@ class Encoder(Model):
         Args:
             config: Dictionary containing encoder configuration:
                 - compression_rate: Compression factor
-                - encoder_layers: List of encoder layer configs
+                - encoder_layers: List of encoder layer configs. Each may set an
+                  optional `dilation` (default 1) on stride-1 layers.
                 - code_dim: Dimension of codebook vectors
         """
         # Verify compression rate matches architecture
@@ -44,12 +45,18 @@ class Encoder(Model):
             channels = layer_cfg["channels"]
             kernel = layer_cfg["kernel"]
             stride = layer_cfg.get("stride", 1)
+            dilation = layer_cfg.get("dilation", 1)
             activation = layer_cfg.get("activation", "elu")
-            
+
+            # Conv1D rejects dilation_rate > 1 together with strides > 1.
+            assert stride == 1 or dilation == 1, \
+                f"Encoder layer cannot combine stride {stride} with dilation {dilation}"
+
             x = layers.Conv1D(
-                channels, kernel, 
-                strides=stride, 
-                padding='same', 
+                channels, kernel,
+                strides=stride,
+                dilation_rate=dilation,
+                padding='same',
                 activation=activation
             )(x)
         
@@ -78,7 +85,8 @@ class Decoder(Model):
         Args:
             config: Dictionary containing decoder configuration:
                 - compression_rate: Compression factor (for verification)
-                - decoder_layers: List of decoder layer configs
+                - decoder_layers: List of decoder layer configs. Each may set an
+                  optional `dilation` (default 1) on stride-1, non-transpose layers.
                 - code_dim: Dimension of codebook vectors
         """
         # Verify decoder expansion rate matches compression rate
@@ -99,9 +107,17 @@ class Decoder(Model):
             channels = layer_cfg["channels"]
             kernel = layer_cfg["kernel"]
             stride = layer_cfg.get("stride", 1)
+            dilation = layer_cfg.get("dilation", 1)
             activation = layer_cfg.get("activation", "elu")
             is_transpose = layer_cfg.get("transpose", False)
-            
+
+            # Conv1D rejects dilation_rate > 1 together with strides > 1, and
+            # Conv1DTranspose only supports dilation_rate 1.
+            assert stride == 1 or dilation == 1, \
+                f"Decoder layer cannot combine stride {stride} with dilation {dilation}"
+            assert not (is_transpose and dilation != 1), \
+                f"Decoder transpose layer cannot use dilation {dilation}"
+
             if is_transpose:
                 x = layers.Conv1DTranspose(
                     channels, kernel,
@@ -113,6 +129,7 @@ class Decoder(Model):
                 x = layers.Conv1D(
                     channels, kernel,
                     strides=stride,
+                    dilation_rate=dilation,
                     padding='same',
                     activation=activation
                 )(x)

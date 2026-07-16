@@ -15,30 +15,38 @@ SAMPLE_RATE = 22050
 #
 # A separate diffusion decoder (see DIFFUSION_CONFIGS and vqwave/diffusion.py) can
 # also render audio from the codes at generation time.
+#
+# Encoder/decoder layers take an optional `dilation` (default 1) to widen the
+# receptive field without extra parameters. Only valid on stride-1, non-transpose
+# convs -- i.e. the frame-rate refinement stacks.
 ENCODER_CONFIGS = {
     "vqvae_256": {
         "compression_rate": 256,
-        "num_codes": 2048,
-        "code_dim": 32,
+        "num_codes": 4096,
+        "code_dim": 16,
         "encoder_layers": [
             # 4^4 = 256
             {"channels": 32, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 64, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu"},
-            # Frame-rate refinement
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            # Frame-rate refinement. Dilations ramp 1,2,4 then two stride-1 cleanup
+            # layers: at kernel 9 every tap spacing stays inside the previous layer's
+            # receptive field, so coverage is gapless. Encoder RF = 19368 (0.88s).
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 2, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 4, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
 
         ],
         "decoder_layers": [
-            # Mirror refinement first
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            # Mirror refinement first (same dilation order as the encoder).
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 2, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 4, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
 
             # 4^4 = 256
             {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
@@ -53,6 +61,12 @@ ENCODER_CONFIGS = {
         # averaged into one unbounded score per example. Deliberately has NO
         # normalization layers: BatchNorm would couple examples in a batch and
         # invalidate the per-example gradient penalty.
+        #
+        # Keep the total stride (4^6 = 4096) and the receptive field (55976 samples,
+        # 2.5s) well under the training crop, or the averaged windows collapse into a
+        # handful of near-identical scores over mostly-padding and the patch ensemble
+        # stops carrying signal. The last layer is stride 1: it buys depth at the
+        # widest channel count without costing windows.
         "critic": {
             "layers": [
                 {"channels": 32,  "kernel": 12, "stride": 4, "alpha": 0.2},
@@ -61,14 +75,14 @@ ENCODER_CONFIGS = {
                 {"channels": 256, "kernel": 12, "stride": 4, "alpha": 0.2},
                 {"channels": 512, "kernel": 12, "stride": 4, "alpha": 0.2},
                 {"channels": 1024, "kernel": 12, "stride": 4, "alpha": 0.2},
-
+                {"channels": 1024, "kernel": 9, "stride": 1, "alpha": 0.2},
             ],
         },
     },
     "vqvae_512": {
         "compression_rate": 512,
         "num_codes": 2048,
-        "code_dim": 32,
+        "code_dim": 16,
         "encoder_layers": [
             # 2 * 4^4 = 512
             {"channels": 32, "kernel": 6, "stride": 2, "activation": "elu"},
@@ -76,18 +90,22 @@ ENCODER_CONFIGS = {
             {"channels": 128, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu"},
             {"channels": 512, "kernel": 12, "stride": 4, "activation": "elu"},
-            # Frame-rate refinement
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            # Frame-rate refinement. Same recipe as vqvae_256: dilations ramp 1,2,4
+            # then two stride-1 cleanup layers. Gapless at kernel 9. Encoder RF =
+            # 38740 samples (1.76s).
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 2, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 4, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
         ],
         "decoder_layers": [
-            # Mirror refinement first
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
-            {"channels": 512, "kernel": 9, "stride": 1, "activation": "elu"},
+            # Mirror refinement first (same dilation order as the encoder).
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 2, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 4, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
+            {"channels": 512, "kernel": 9, "stride": 1, "dilation": 1, "activation": "elu"},
 
             # 2 * 4^4 = 512
             {"channels": 256, "kernel": 12, "stride": 4, "activation": "elu", "transpose": True},
@@ -103,6 +121,12 @@ ENCODER_CONFIGS = {
         # averaged into one unbounded score per example. Deliberately has NO
         # normalization layers: BatchNorm would couple examples in a batch and
         # invalidate the per-example gradient penalty.
+        #
+        # Keep the total stride (4^6 = 4096) and the receptive field (55976 samples,
+        # 2.5s) well under the training crop, or the averaged windows collapse into a
+        # handful of near-identical scores over mostly-padding and the patch ensemble
+        # stops carrying signal. The last layer is stride 1: it buys depth at the
+        # widest channel count without costing windows.
         "critic": {
             "layers": [
                 {"channels": 32,  "kernel": 12, "stride": 4, "alpha": 0.2},
@@ -110,6 +134,8 @@ ENCODER_CONFIGS = {
                 {"channels": 128, "kernel": 12, "stride": 4, "alpha": 0.2},
                 {"channels": 256, "kernel": 12, "stride": 4, "alpha": 0.2},
                 {"channels": 512, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 1024, "kernel": 12, "stride": 4, "alpha": 0.2},
+                {"channels": 1024, "kernel": 9, "stride": 1, "alpha": 0.2},
             ],
         },
     },

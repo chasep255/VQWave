@@ -191,8 +191,8 @@ def main():
                        help='Codebook reset limit (default: 256)')
     parser.add_argument('--learning-rate', '--lr', type=float, default=1e-4,
                        help='Initial learning rate (default: 1e-4)')
-    parser.add_argument('--decay-rate', type=float, default=0.9,
-                       help='Multiplicative LR decay applied every --decay-steps (default: 0.9)')
+    parser.add_argument('--decay-rate', type=float, default=0.95,
+                       help='Multiplicative LR decay applied every --decay-steps (default: 0.95)')
     parser.add_argument('--decay-steps', type=int, default=None,
                        help='Number of steps for each decay (default: epoch_steps)')
     parser.add_argument('--loss', type=str, default='stft',
@@ -211,8 +211,8 @@ def main():
     parser.add_argument('--gp-weight', type=float, default=10.0,
                        help='Gradient-penalty weight enforcing the critic 1-Lipschitz '
                             'constraint (default: 10.0, the WGAN-GP paper value)')
-    parser.add_argument('--n-critic', type=int, default=5,
-                       help='Critic updates per generator update (default: 5, the '
+    parser.add_argument('--n-critic', type=int, default=3,
+                       help='Critic updates per generator update (default: 3, the '
                             'WGAN-GP paper value)')
     parser.add_argument('--critic-lr', type=float, default=1e-4,
                        help='Critic learning rate (default: 1e-4)')
